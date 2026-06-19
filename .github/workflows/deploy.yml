@@ -18,10 +18,18 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            cd ${{ secrets.APP_DIR }}
+            # Auto-detect app directory
+            APP_DIR=$(find /home /root /var/www -maxdepth 4 -name "server.js" 2>/dev/null | grep -i "spokenOdessie_backend\|spoken-odyssey\|backend" | head -1 | xargs dirname | xargs dirname 2>/dev/null)
+            if [ -z "$APP_DIR" ]; then
+              echo "❌ Could not find app directory. Tried /home, /root, /var/www"
+              exit 1
+            fi
+            echo "✅ Found app at: $APP_DIR"
+            cd "$APP_DIR"
             git fetch origin
             git checkout br/mudassir
             git pull origin br/mudassir
             npm install --production
             pm2 restart all || pm2 start src/server.js --name spoken-odyssey
             pm2 status
+            echo "🚀 Deployment complete!"
