@@ -1,0 +1,112 @@
+name: Deploy to AWS EC2
+
+on:
+  push:
+    branches:
+      - br/mudassir
+
+jobs:
+  deploy:
+    name: SSH into EC2 and deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # Helper to check if a directory is our app directory
+            is_app_dir() {
+              local dir="$1"
+              if [ -f "$dir/src/server.js" ] && [ -f "$dir/package.json" ]; then
+                if grep -q -E '"name":[[:space:]]*"[^"]*(spoken|odyssey|backend)[^"]*"' "$dir/package.json"; then
+                  return 0
+                fi
+              fi
+              return 1
+            }
+
+            APP_DIR=""
+
+            # 1. Try finding via PM2 processes
+            echo "Checking PM2 processes..."
+            if command -v pm2 &> /dev/null; then
+              PM2_PATHS=$(pm2 jlist | grep -o '"pm_cwd":"[^"]*"' | cut -d'"' -f4 | sort -u)
+              for path in $PM2_PATHS; do
+                if is_app_dir "$path"; then
+                  APP_DIR="$path"
+                  echo "Found app via PM2: $APP_DIR"
+                  break
+                fi
+              done
+            fi
+
+            # 2. Try finding via running Node processes
+            if [ -z "$APP_DIR" ]; then
+              echo "Checking running Node processes..."
+              NODE_PIDS=$(pgrep -f node || true)
+              for pid in $NODE_PIDS; do
+                cwd=$(readlink -f /proc/$pid/cwd 2>/dev/null || true)
+                if [ -n "$cwd" ] && is_app_dir "$cwd"; then
+                  APP_DIR="$cwd"
+                  echo "Found app via running process: $APP_DIR"
+                  break
+                fi
+              done
+            fi
+
+            # 3. Search common directories (/home, /var/www, /opt, /root, /srv)
+            if [ -z "$APP_DIR" ]; then
+              echo "Searching common directories..."
+              while read -r pkg_json; do
+                dir=$(dirname "$pkg_json")
+                if is_app_dir "$dir"; then
+                  APP_DIR="$dir"
+                  echo "Found app via directory search: $APP_DIR"
+                  break
+                fi
+              done < <(find /home /var/www /opt /root /srv -name "package.json" 2>/dev/null)
+            fi
+
+            # 4. Search entire filesystem (excluding virtual/system paths)
+            if [ -z "$APP_DIR" ]; then
+              echo "Searching entire filesystem..."
+              while read -r pkg_json; do
+                dir=$(dirname "$pkg_json")
+                if is_app_dir "$dir"; then
+                  APP_DIR="$dir"
+                  echo "Found app via full search: $APP_DIR"
+                  break
+                fi
+              done < <(find / -path "/proc" -prune -o -path "/sys" -prune -o -path "/dev" -prune -o -path "/var/lib" -prune -o -name "package.json" -print 2>/dev/null)
+            fi
+
+            # 5. Fallback diagnostics if not found
+            if [ -z "$APP_DIR" ]; then
+              echo "❌ Could not find app directory automatically."
+              echo "=== DIAGNOSTIC INFORMATION ==="
+              echo "Current User: $(whoami)"
+              echo "Current Directory: $(pwd)"
+              echo "PM2 Status:"
+              pm2 status || echo "PM2 not running or not in PATH"
+              echo "Running Node Processes:"
+              ps -ef | grep node || echo "No Node processes"
+              echo "Files in user home directory:"
+              ls -la ~
+              echo "Searching for any server.js files on system..."
+              find / -path "/proc" -prune -o -path "/sys" -prune -o -path "/dev" -prune -o -name "server.js" -print 2>/dev/null
+              exit 1
+            fi
+
+            echo "✅ Found app at: $APP_DIR"
+            cd "$APP_DIR"
+            git fetch origin
+            git checkout br/mudassir
+            git pull origin br/mudassir
+            npm install --production
+            pm2 restart all || pm2 start src/server.js --name spoken-odyssey
+            pm2 status
+            echo "🚀 Deployment complete!"
