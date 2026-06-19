@@ -71,7 +71,15 @@ const uploadFileToS3 = async ({ file, folder }) => {
 };
 
 const getSignedFileUrl = async (key) => {
-  if (!key || !s3BucketName) {
+  if (!key) {
+    return null;
+  }
+
+  if (key.startsWith("http://") || key.startsWith("https://")) {
+    return key;
+  }
+
+  if (!s3BucketName) {
     return null;
   }
 
