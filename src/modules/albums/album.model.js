@@ -34,6 +34,11 @@ const albumSchema = new mongoose.Schema(
       trim: true,
       default: null,
     },
+    privacy: {
+      type: String,
+      trim: true,
+      default: "Private",
+    },
     entries: {
       type: Number,
       default: 0,

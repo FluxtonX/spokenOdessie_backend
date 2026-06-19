@@ -3,6 +3,11 @@ const Album = require("./album.model");
 const findByOwnerFirebaseUid = (ownerFirebaseUid) =>
   Album.find({ ownerFirebaseUid }).sort({ createdAt: -1 }).lean();
 
+const findByOwnerAndPrivacy = (ownerFirebaseUid, allowedPrivacy) =>
+  Album.find({ ownerFirebaseUid, privacy: { $in: allowedPrivacy } })
+    .sort({ createdAt: -1 })
+    .lean();
+
 const create = (payload) => Album.create(payload);
 
 const findByIdAndOwnerFirebaseUid = (id, ownerFirebaseUid) =>
@@ -41,6 +46,7 @@ const updateMemory = ({ albumId, ownerFirebaseUid, memory }) =>
 
 module.exports = {
   findByOwnerFirebaseUid,
+  findByOwnerAndPrivacy,
   create,
   findByIdAndOwnerFirebaseUid,
   addMemory,

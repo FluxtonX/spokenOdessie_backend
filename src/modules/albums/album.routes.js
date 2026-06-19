@@ -22,6 +22,8 @@ const upload = multer({
 });
 
 router.get("/", protect, controller.getAlbums);
+router.get("/:id", protect, controller.getAlbumDetails);
 router.post("/", protect, upload.single("coverImage"), controller.createAlbum);
+router.patch("/:id", protect, upload.single("coverImage"), controller.updateAlbum);
 
 module.exports = router;

@@ -2,7 +2,7 @@ const memoryService = require("./memory.service");
 
 const getMemories = async (req, res) => {
   try {
-    const memories = await memoryService.getMemoriesByUser(req.user);
+    const memories = await memoryService.getMemoriesByUser(req.user, req.query.userId);
 
     res.status(200).json({
       success: true,
@@ -31,7 +31,9 @@ const createMemory = async (req, res) => {
       albumId: req.body.albumId,
       occurredAt: req.body.occurredAt,
       color: req.body.color,
-      file: req.file,
+      backgroundId: req.body.backgroundId,
+      fontId: req.body.fontId,
+      files: req.files || (req.file ? [req.file] : []),
     });
 
     res.status(201).json({
@@ -43,6 +45,44 @@ const createMemory = async (req, res) => {
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || "Failed to save memory",
+    });
+  }
+};
+
+const getFeed = async (req, res) => {
+  try {
+    const memories = await memoryService.getFeedMemories({ user: req.user });
+
+    res.status(200).json({
+      success: true,
+      data: memories,
+    });
+  } catch (error) {
+    console.error("Get Feed Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to fetch feed memories",
+    });
+  }
+};
+
+const interactWithMemory = async (req, res) => {
+  try {
+    const result = await memoryService.interactWithMemory({
+      user: req.user,
+      memoryId: req.params.id,
+      type: req.body.type,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Interact with Memory Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to log interaction",
     });
   }
 };
@@ -75,6 +115,9 @@ const updateMemory = async (req, res) => {
       title: req.body.title,
       description: req.body.description,
       color: req.body.color,
+      backgroundId: req.body.backgroundId,
+      fontId: req.body.fontId,
+      files: req.files || (req.file ? [req.file] : []),
     });
 
     res.status(200).json({
@@ -90,9 +133,32 @@ const updateMemory = async (req, res) => {
   }
 };
 
+const getMemoryDetails = async (req, res) => {
+  try {
+    const memory = await memoryService.getMemoryDetails({
+      currentUser: req.user,
+      memoryId: req.params.id,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: memory,
+    });
+  } catch (error) {
+    console.error("Get Memory Details Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to fetch memory details",
+    });
+  }
+};
+
 module.exports = {
   getMemories,
   createMemory,
   updateMemory,
   deleteMemory,
+  getFeed,
+  interactWithMemory,
+  getMemoryDetails,
 };

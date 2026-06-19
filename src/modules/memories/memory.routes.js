@@ -25,9 +25,12 @@ const upload = multer({
   },
 });
 
+router.get("/feed", protect, controller.getFeed);
 router.get("/", protect, controller.getMemories);
-router.post("/", protect, upload.single("media"), controller.createMemory);
-router.patch("/:id", protect, controller.updateMemory);
+router.get("/:id", protect, controller.getMemoryDetails);
+router.post("/", protect, upload.array("media", 10), controller.createMemory);
+router.post("/:id/interact", protect, controller.interactWithMemory);
+router.patch("/:id", protect, upload.array("media", 10), controller.updateMemory);
 router.delete("/:id", protect, controller.deleteMemory);
 
 module.exports = router;

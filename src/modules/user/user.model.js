@@ -78,6 +78,20 @@ const userSchema = new mongoose.Schema(
       enum: ["user", "admin"],
       default: "user",
     },
+    familyMembers: {
+      type: [String],
+      default: [],
+    },
+    recentInteractions: {
+      type: [
+        {
+          tag: String,
+          timestamp: { type: Date, default: Date.now },
+          weight: { type: Number, default: 1 }
+        }
+      ],
+      default: [],
+    },
     isActive: {
       type: Boolean,
       default: true,
