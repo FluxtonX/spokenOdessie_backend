@@ -153,6 +153,67 @@ const getMemoryDetails = async (req, res) => {
   }
 };
 
+const reactToMemory = async (req, res) => {
+  try {
+    const result = await memoryService.reactToMemory({
+      user: req.user,
+      memoryId: req.params.id,
+      type: req.body.type,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error("React to Memory Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to toggle reaction",
+    });
+  }
+};
+
+const shareMemory = async (req, res) => {
+  try {
+    const result = await memoryService.shareMemory({
+      memoryId: req.params.id,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Share Memory Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to increment share count",
+    });
+  }
+};
+
+const getDiscoveryMemories = async (req, res) => {
+  try {
+    const memories = await memoryService.getDiscoveryMemories({
+      user: req.user,
+      filter: req.query.filter,
+      theme: req.query.theme,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: memories,
+    });
+  } catch (error) {
+    console.error("Get Discovery Memories Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to fetch discovery memories",
+    });
+  }
+};
+
 module.exports = {
   getMemories,
   createMemory,
@@ -161,4 +222,7 @@ module.exports = {
   getFeed,
   interactWithMemory,
   getMemoryDetails,
+  reactToMemory,
+  shareMemory,
+  getDiscoveryMemories,
 };

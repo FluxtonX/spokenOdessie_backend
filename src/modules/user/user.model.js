@@ -100,6 +100,65 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+    coverKey: {
+      type: String,
+      trim: true,
+    },
+    coverURL: {
+      type: String,
+      trim: true,
+    },
+    goals: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    projects: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    achievements: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    interests: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    lessons: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    values: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    causes: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    personalityQs: {
+      type: [
+        {
+          q: String,
+          a: String,
+        }
+      ],
+      default: [
+        { q: "What is your happiest memory from childhood?", a: "" },
+        { q: "How would you like to be remembered?", a: "" }
+      ],
+    },
+    lastActive: {
+      type: Date,
+      default: Date.now,
+    },
   },
   {
     timestamps: true,

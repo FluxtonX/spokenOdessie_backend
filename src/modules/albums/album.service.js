@@ -228,6 +228,7 @@ const getAlbumDetails = async ({ currentUser, albumId }) => {
 };
 
 module.exports = {
+  serializeAlbum,
   getAlbumsByUser,
   createAlbum,
   updateAlbum,

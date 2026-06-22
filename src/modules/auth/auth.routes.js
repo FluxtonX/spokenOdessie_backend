@@ -22,7 +22,10 @@ router.get("/me", protect, getMe);
 router.put(
   "/profile",
   protect,
-  profileUpload.single("profileImage"),
+  profileUpload.fields([
+    { name: "profileImage", maxCount: 1 },
+    { name: "coverImage", maxCount: 1 }
+  ]),
   updateProfile
 );
 

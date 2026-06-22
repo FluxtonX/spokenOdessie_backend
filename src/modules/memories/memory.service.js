@@ -64,7 +64,7 @@ const normalizeOccurredAt = (dateValue) => {
   return parsed;
 };
 
-const serializeMemory = async (memoryDoc) => {
+const serializeMemory = async (memoryDoc, currentUser = null) => {
   const memory =
     typeof memoryDoc.toObject === "function" ? memoryDoc.toObject() : memoryDoc;
 
@@ -109,6 +109,32 @@ const serializeMemory = async (memoryDoc) => {
     ownerDisplayName = "Alexander Mitchell";
   }
 
+  // Load reactions
+  let userReaction = null;
+  const reactionsCount = { heart: 0, like: 0, wow: 0, haha: 0, angry: 0 };
+  try {
+    const PostReaction = require("./postReaction.model");
+    if (currentUser) {
+      const activeReact = await PostReaction.findOne({
+        memoryId: memory._id,
+        userFirebaseUid: currentUser.uid || currentUser.firebaseUid
+      }).lean();
+      if (activeReact) {
+        userReaction = activeReact.type;
+      }
+    }
+
+    const stats = await PostReaction.aggregate([
+      { $match: { memoryId: memory._id } },
+      { $group: { _id: "$type", count: { $sum: 1 } } }
+    ]);
+    stats.forEach(s => {
+      reactionsCount[s._id] = s.count;
+    });
+  } catch (err) {
+    console.warn("Failed to load reaction stats in serializeMemory:", err.message);
+  }
+
   return {
     id: memory._id.toString(),
     ownerFirebaseUid: memory.ownerFirebaseUid || "",
@@ -131,6 +157,9 @@ const serializeMemory = async (memoryDoc) => {
     mediaList: mediaListWithUrls,
     likes: typeof memory.likes === "number" ? memory.likes : 0,
     comments: typeof memory.comments === "number" ? memory.comments : 0,
+    shares: typeof memory.shares === "number" ? memory.shares : 0,
+    reactions: reactionsCount,
+    userReaction,
     color: memory.color || "",
     backgroundId: memory.backgroundId || "none",
     fontId: memory.fontId || "default",
@@ -160,6 +189,9 @@ const buildAlbumMemorySnapshot = (serializedMemory) => ({
   date: serializedMemory.date,
   likes: serializedMemory.likes,
   comments: serializedMemory.comments,
+  shares: serializedMemory.shares,
+  reactions: serializedMemory.reactions,
+  userReaction: serializedMemory.userReaction,
   color: serializedMemory.color,
   mediaUrl: serializedMemory.mediaUrl,
   thumbnailUrl: serializedMemory.thumbnailUrl,
@@ -177,7 +209,7 @@ const getMemoriesByUser = async (currentUser, targetUserId) => {
 
   if (targetUid === currentUser.uid) {
     const memories = await memoryRepository.findByOwnerFirebaseUid(currentUser.uid);
-    return Promise.all(memories.map((memory) => serializeMemory(memory)));
+    return Promise.all(memories.map((memory) => serializeMemory(memory, currentUser)));
   }
 
   const User = require("../user/user.model");
@@ -191,7 +223,7 @@ const getMemoriesByUser = async (currentUser, targetUserId) => {
   }
 
   const memories = await memoryRepository.findByOwnerAndPrivacy(targetUid, allowedPrivacy);
-  return Promise.all(memories.map((memory) => serializeMemory(memory)));
+  return Promise.all(memories.map((memory) => serializeMemory(memory, currentUser)));
 };
 
 const INTEREST_KEYWORDS = {
@@ -377,7 +409,7 @@ const createMemory = async ({
     fontId: typeof fontId === "string" ? fontId.trim() : "default",
   });
 
-  const serializedMemory = await serializeMemory(memory);
+  const serializedMemory = await serializeMemory(memory, user);
 
   if (normalizedStatus === "published" && album) {
     await albumRepository.addMemory({
@@ -454,7 +486,7 @@ const updateMemory = async ({ user, memoryId, title, description, color, backgro
     payload
   );
 
-  const serializedMemory = await serializeMemory(updatedMemory);
+  const serializedMemory = await serializeMemory(updatedMemory, user);
 
   if (updatedMemory.albumId) {
     await albumRepository.updateMemory({
@@ -527,7 +559,7 @@ const getFeedMemories = async ({ user }) => {
 
   const scoredMemories = await Promise.all(
     memories.map(async (memoryDoc) => {
-      const serialized = await serializeMemory(memoryDoc);
+      const serialized = await serializeMemory(memoryDoc, user);
       const ageInHours = (Date.now() - new Date(serialized.date).getTime()) / (1000 * 60 * 60);
       const recencyScore = 100 / (1 + ageInHours);
 
@@ -605,7 +637,7 @@ const getMemoryDetails = async ({ currentUser, memoryId }) => {
   }
 
   if (memory.ownerFirebaseUid === currentUser.uid) {
-    return serializeMemory(memory);
+    return serializeMemory(memory, currentUser);
   }
 
   if (memory.privacy === "Public") {
@@ -614,7 +646,7 @@ const getMemoryDetails = async ({ currentUser, memoryId }) => {
       error.statusCode = 403;
       throw error;
     }
-    return serializeMemory(memory);
+    return serializeMemory(memory, currentUser);
   }
 
   if (memory.privacy === "Family" || memory.privacy === "Family Circle") {
@@ -630,7 +662,7 @@ const getMemoryDetails = async ({ currentUser, memoryId }) => {
       error.statusCode = 403;
       throw error;
     }
-    return serializeMemory(memory);
+    return serializeMemory(memory, currentUser);
   }
 
   const error = new Error("Access denied: this memory is private.");
@@ -638,7 +670,153 @@ const getMemoryDetails = async ({ currentUser, memoryId }) => {
   throw error;
 };
 
+const reactToMemory = async ({ user, memoryId, type }) => {
+  const PostReaction = require("./postReaction.model");
+  const Memory = require("./memory.model");
+
+  const memory = await Memory.findById(memoryId);
+  if (!memory) {
+    const error = new Error("Memory not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const existingReaction = await PostReaction.findOne({
+    memoryId,
+    userFirebaseUid: user.uid
+  });
+
+  let userReaction = type;
+
+  if (existingReaction) {
+    const oldType = existingReaction.type;
+    if (oldType === type || !type) {
+      // Toggle off
+      await PostReaction.deleteOne({ _id: existingReaction._id });
+      await Memory.findByIdAndUpdate(memoryId, { $inc: { likes: -1 } });
+      userReaction = null;
+    } else {
+      // Change reaction
+      existingReaction.type = type;
+      await existingReaction.save();
+    }
+  } else if (type) {
+    // Add reaction
+    await PostReaction.create({
+      memoryId,
+      userFirebaseUid: user.uid,
+      type
+    });
+    await Memory.findByIdAndUpdate(memoryId, { $inc: { likes: 1 } });
+  }
+
+  // Also log user interaction for personalization matching
+  if (type) {
+    await interactWithMemory({ user, memoryId, type: "like" });
+  }
+
+  const updatedMemory = await Memory.findById(memoryId);
+  const serializedMemory = await serializeMemory(updatedMemory, user);
+  
+  if (updatedMemory.albumId) {
+    const albumRepository = require("../albums/album.repository");
+    await albumRepository.updateMemory({
+      albumId: updatedMemory.albumId,
+      ownerFirebaseUid: updatedMemory.ownerFirebaseUid,
+      memory: buildAlbumMemorySnapshot(serializedMemory),
+    });
+  }
+
+  return {
+    likes: updatedMemory.likes || 0,
+    reactions: serializedMemory.reactions,
+    userReaction
+  };
+};
+
+const shareMemory = async ({ memoryId }) => {
+  const Memory = require("./memory.model");
+
+  const memory = await Memory.findById(memoryId);
+  if (!memory) {
+    const error = new Error("Memory not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  await Memory.findByIdAndUpdate(memoryId, { $inc: { shares: 1 } });
+
+  const updatedMemory = await Memory.findById(memoryId);
+  const serializedMemory = await serializeMemory(updatedMemory);
+
+  if (updatedMemory.albumId) {
+    const albumRepository = require("../albums/album.repository");
+    await albumRepository.updateMemory({
+      albumId: updatedMemory.albumId,
+      ownerFirebaseUid: updatedMemory.ownerFirebaseUid,
+      memory: buildAlbumMemorySnapshot(serializedMemory),
+    });
+  }
+
+  return {
+    shares: updatedMemory.shares || 0
+  };
+};
+
+const getDiscoveryMemories = async ({ user, filter = "for-you", theme }) => {
+  const User = require("../user/user.model");
+  const Memory = require("./memory.model");
+
+  const currentUserDoc = await User.findOne({ firebaseUid: user.uid });
+  const familyUids = currentUserDoc ? currentUserDoc.familyMembers || [] : [];
+
+  let query = {};
+
+  if (filter === "family") {
+    // Show ONLY family posts from connected family members and the user themselves
+    query = {
+      privacy: { $in: ["Family Circle", "Family"] },
+      status: "published",
+      ownerFirebaseUid: { $in: [...familyUids, user.uid] }
+    };
+  } else if (filter === "public") {
+    query = {
+      privacy: "Public",
+      status: "published"
+    };
+  } else if (filter === "themes") {
+    query = {
+      privacy: "Public",
+      status: "published"
+    };
+    if (theme && theme !== "All") {
+      const cleanTheme = theme.trim().toLowerCase();
+      const themeParts = cleanTheme.split(" ");
+      query.$or = themeParts.map(part => ({
+        tags: { $in: [new RegExp(part, "i")] }
+      }));
+    }
+  } else {
+    // for-you: show all public memories + connected family memories of connected family members and user themselves
+    query = {
+      $or: [
+        { privacy: "Public", status: "published" },
+        {
+          privacy: { $in: ["Family Circle", "Family"] },
+          status: "published",
+          ownerFirebaseUid: { $in: [...familyUids, user.uid] }
+        }
+      ]
+    };
+  }
+
+  // Execute query and serialize
+  const memories = await Memory.find(query).sort({ occurredAt: -1 }).limit(100);
+  return Promise.all(memories.map((m) => serializeMemory(m, user)));
+};
+
 module.exports = {
+  serializeMemory,
   getMemoriesByUser,
   createMemory,
   updateMemory,
@@ -646,4 +824,7 @@ module.exports = {
   getFeedMemories,
   interactWithMemory,
   getMemoryDetails,
+  reactToMemory,
+  shareMemory,
+  getDiscoveryMemories,
 };

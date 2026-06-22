@@ -109,6 +109,11 @@ const memorySchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    shares: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     color: {
       type: String,
       trim: true,
