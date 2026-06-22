@@ -5,6 +5,8 @@ const helmet = require("helmet");
 const authRoutes = require("./modules/auth/auth.routes");
 const albumRoutes = require("./modules/albums/album.routes");
 const memoryRoutes = require("./modules/memories/memory.routes");
+const userRoutes = require("./modules/user/user.routes");
+const searchRoutes = require("./modules/search/search.routes");
 
 const app = express();
 
@@ -23,6 +25,8 @@ app.use((req, res, next) => {
 app.use("/api/auth", authRoutes);
 app.use("/api/albums", albumRoutes);
 app.use("/api/memories", memoryRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api/search", searchRoutes);
 
 app.get("/health", (req, res) => {
   res.status(200).json({
