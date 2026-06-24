@@ -192,13 +192,19 @@ const updateProfile = async (req, res) => {
       }
     }
 
-    if (typeof req.body.onboardingCompleted === "boolean") {
-      user.onboardingCompleted = req.body.onboardingCompleted;
+    let onboardingCompleted = req.body.onboardingCompleted;
+    if (onboardingCompleted === "true") onboardingCompleted = true;
+    if (onboardingCompleted === "false") onboardingCompleted = false;
+    if (typeof onboardingCompleted === "boolean") {
+      user.onboardingCompleted = onboardingCompleted;
     }
 
-    if (typeof req.body.profileCompleted === "boolean") {
+    let profileCompleted = req.body.profileCompleted;
+    if (profileCompleted === "true") profileCompleted = true;
+    if (profileCompleted === "false") profileCompleted = false;
+    if (typeof profileCompleted === "boolean") {
       user.profileCompleted =
-        req.body.profileCompleted && computeProfileCompleted(user);
+        profileCompleted && computeProfileCompleted(user);
     } else {
       user.profileCompleted = computeProfileCompleted(user);
     }
@@ -246,8 +252,47 @@ const getMe = async (req, res) => {
   }
 };
 
+/**
+ * @desc    Mock email verification for testing using code 555555
+ * @route   POST /api/auth/verify-mock
+ * @access  Private
+ */
+const verifyMock = async (req, res) => {
+  try {
+    const { code } = req.body;
+    if (code !== "555555") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid verification code. Please use 555555.",
+      });
+    }
+
+    const admin = require("../../config/firebase");
+    if (!admin.apps.length) {
+      throw new Error("Firebase Admin not initialized");
+    }
+
+    // Set emailVerified to true in Firebase Auth using Admin SDK
+    await admin.auth().updateUser(req.user.uid, {
+      emailVerified: true,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Email verified successfully.",
+    });
+  } catch (error) {
+    console.error("Verify Mock Error:", error.message);
+    res.status(500).json({
+      success: false,
+      message: "Failed to verify email: " + error.message,
+    });
+  }
+};
+
 module.exports = {
   syncUser,
   getMe,
   updateProfile,
+  verifyMock,
 };
