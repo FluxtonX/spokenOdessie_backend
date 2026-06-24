@@ -39,8 +39,31 @@ const serializeUser = async (userDocument) => {
       : { ...userDocument };
 
   if (user.photoKey) {
-    user.photoURL = await getSignedFileUrl(user.photoKey);
+    try {
+      user.photoURL = await getSignedFileUrl(user.photoKey);
+    } catch (_) {}
   }
+
+  if (user.coverKey) {
+    try {
+      user.coverURL = await getSignedFileUrl(user.coverKey);
+    } catch (_) {}
+  } else if (!user.coverURL) {
+    user.coverURL = "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1200&q=80";
+  }
+
+  try {
+    const Follow = require("../user/follow.model");
+    user.followersCount = await Follow.countDocuments({ followingId: user.firebaseUid });
+    user.followingCount = await Follow.countDocuments({ followerId: user.firebaseUid });
+  } catch (err) {
+    console.warn("Failed to get follow stats for user:", err.message);
+    user.followersCount = 0;
+    user.followingCount = 0;
+  }
+
+  const threeMinutesAgo = new Date(Date.now() - 3 * 60 * 1000);
+  user.isActive = user.lastActive ? new Date(user.lastActive) > threeMinutesAgo : false;
 
   return user;
 };
@@ -103,9 +126,28 @@ const updateProfile = async (req, res) => {
       });
     }
 
+    let personalityQs = req.body.personalityQs;
+    if (typeof personalityQs === "string") {
+      try {
+        personalityQs = JSON.parse(personalityQs);
+      } catch (_) {
+        personalityQs = undefined;
+      }
+    }
+
+    let expertise = req.body.expertise;
+    if (typeof expertise === "string") {
+      try {
+        expertise = JSON.parse(expertise);
+      } catch (_) {
+        expertise = undefined;
+      }
+    }
+
     const updates = {
       displayName: normalizeString(req.body.displayName),
       photoURL: normalizeString(req.body.photoURL),
+      coverURL: normalizeString(req.body.coverURL),
       bio: normalizeString(req.body.bio),
       profession: normalizeString(req.body.profession),
       location: normalizeString(req.body.location),
@@ -113,7 +155,14 @@ const updateProfile = async (req, res) => {
       lifeMotto: normalizeString(req.body.lifeMotto),
       defaultEntryPrivacy: normalizeString(req.body.defaultEntryPrivacy),
       profileVisibility: normalizeString(req.body.profileVisibility),
-      expertise: normalizeStringList(req.body.expertise),
+      expertise: Array.isArray(expertise) ? normalizeStringList(expertise) : normalizeStringList(req.body.expertise),
+      goals: normalizeString(req.body.goals),
+      projects: normalizeString(req.body.projects),
+      achievements: normalizeString(req.body.achievements),
+      interests: normalizeString(req.body.interests),
+      lessons: normalizeString(req.body.lessons),
+      values: normalizeString(req.body.values),
+      causes: normalizeString(req.body.causes),
     };
 
     Object.entries(updates).forEach(([key, value]) => {
@@ -122,21 +171,40 @@ const updateProfile = async (req, res) => {
       }
     });
 
-    if (req.file) {
-      const { key } = await uploadFileToS3({
-        file: req.file,
-        folder: `profiles/${req.user.uid}`,
-      });
-      user.photoKey = key;
+    if (Array.isArray(personalityQs)) {
+      user.personalityQs = personalityQs;
     }
 
-    if (typeof req.body.onboardingCompleted === "boolean") {
-      user.onboardingCompleted = req.body.onboardingCompleted;
+    if (req.files) {
+      if (req.files.profileImage?.[0]) {
+        const { key } = await uploadFileToS3({
+          file: req.files.profileImage[0],
+          folder: `profiles/${req.user.uid}/avatar`,
+        });
+        user.photoKey = key;
+      }
+      if (req.files.coverImage?.[0]) {
+        const { key } = await uploadFileToS3({
+          file: req.files.coverImage[0],
+          folder: `profiles/${req.user.uid}/cover`,
+        });
+        user.coverKey = key;
+      }
     }
 
-    if (typeof req.body.profileCompleted === "boolean") {
+    let onboardingCompleted = req.body.onboardingCompleted;
+    if (onboardingCompleted === "true") onboardingCompleted = true;
+    if (onboardingCompleted === "false") onboardingCompleted = false;
+    if (typeof onboardingCompleted === "boolean") {
+      user.onboardingCompleted = onboardingCompleted;
+    }
+
+    let profileCompleted = req.body.profileCompleted;
+    if (profileCompleted === "true") profileCompleted = true;
+    if (profileCompleted === "false") profileCompleted = false;
+    if (typeof profileCompleted === "boolean") {
       user.profileCompleted =
-        req.body.profileCompleted && computeProfileCompleted(user);
+        profileCompleted && computeProfileCompleted(user);
     } else {
       user.profileCompleted = computeProfileCompleted(user);
     }
@@ -184,8 +252,47 @@ const getMe = async (req, res) => {
   }
 };
 
+/**
+ * @desc    Mock email verification for testing using code 555555
+ * @route   POST /api/auth/verify-mock
+ * @access  Private
+ */
+const verifyMock = async (req, res) => {
+  try {
+    const { code } = req.body;
+    if (code !== "555555") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid verification code. Please use 555555.",
+      });
+    }
+
+    const admin = require("../../config/firebase");
+    if (!admin.apps.length) {
+      throw new Error("Firebase Admin not initialized");
+    }
+
+    // Set emailVerified to true in Firebase Auth using Admin SDK
+    await admin.auth().updateUser(req.user.uid, {
+      emailVerified: true,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Email verified successfully.",
+    });
+  } catch (error) {
+    console.error("Verify Mock Error:", error.message);
+    res.status(500).json({
+      success: false,
+      message: "Failed to verify email: " + error.message,
+    });
+  }
+};
+
 module.exports = {
   syncUser,
   getMe,
   updateProfile,
+  verifyMock,
 };

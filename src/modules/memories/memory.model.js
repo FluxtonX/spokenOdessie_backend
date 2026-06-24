@@ -88,6 +88,17 @@ const memorySchema = new mongoose.Schema(
       trim: true,
       default: "",
     },
+    mediaList: {
+      type: [
+        {
+          mediaKey: String,
+          thumbnailKey: String,
+          mediaOriginalName: String,
+          mediaMimeType: String,
+        }
+      ],
+      default: [],
+    },
     likes: {
       type: Number,
       default: 0,
@@ -98,10 +109,25 @@ const memorySchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    shares: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     color: {
       type: String,
       trim: true,
       default: "",
+    },
+    backgroundId: {
+      type: String,
+      trim: true,
+      default: "none",
+    },
+    fontId: {
+      type: String,
+      trim: true,
+      default: "default",
     },
   },
   {

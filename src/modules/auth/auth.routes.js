@@ -1,7 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 const router = express.Router();
-const { syncUser, getMe, updateProfile } = require("./auth.controller");
+const { syncUser, getMe, updateProfile, verifyMock } = require("./auth.controller");
 const { protect } = require("../../middlewares/auth.middleware");
 
 const profileUpload = multer({
@@ -19,10 +19,14 @@ const profileUpload = multer({
 
 router.post("/sync", protect, syncUser);
 router.get("/me", protect, getMe);
+router.post("/verify-mock", protect, verifyMock);
 router.put(
   "/profile",
   protect,
-  profileUpload.single("profileImage"),
+  profileUpload.fields([
+    { name: "profileImage", maxCount: 1 },
+    { name: "coverImage", maxCount: 1 }
+  ]),
   updateProfile
 );
 

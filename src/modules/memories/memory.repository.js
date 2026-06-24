@@ -3,6 +3,9 @@ const Memory = require("./memory.model");
 const findByOwnerFirebaseUid = (ownerFirebaseUid) =>
   Memory.find({ ownerFirebaseUid }).sort({ updatedAt: -1 });
 
+const findByOwnerAndPrivacy = (ownerFirebaseUid, allowedPrivacy) =>
+  Memory.find({ ownerFirebaseUid, privacy: { $in: allowedPrivacy } }).sort({ updatedAt: -1 });
+
 const findByIdAndOwnerFirebaseUid = (id, ownerFirebaseUid) =>
   Memory.findOne({ _id: id, ownerFirebaseUid });
 
@@ -19,6 +22,7 @@ const deleteByIdAndOwnerFirebaseUid = (id, ownerFirebaseUid) =>
 
 module.exports = {
   findByOwnerFirebaseUid,
+  findByOwnerAndPrivacy,
   findByIdAndOwnerFirebaseUid,
   create,
   updateByIdAndOwnerFirebaseUid,
