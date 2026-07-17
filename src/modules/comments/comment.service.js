@@ -1,26 +1,33 @@
-const Comment = require("./comment.model");
-const CommentReaction = require("./commentReaction.model");
-const Memory = require("../memories/memory.model");
-const User = require("../user/user.model");
+const prisma = require("../../config/prisma");
 const { getSignedFileUrl } = require("../../services/s3.service");
 
 const getCommentsForMemory = async ({ currentUser, memoryId }) => {
-  const comments = await Comment.find({ memoryId }).sort({ createdAt: 1 }).lean();
+  const comments = await prisma.comment.findMany({
+    where: { memoryId },
+    orderBy: { createdAt: "asc" }
+  });
+  
   if (!comments.length) return [];
 
-  const commentIds = comments.map(c => c._id);
-  const userReactions = await CommentReaction.find({
-    commentId: { $in: commentIds },
-    userFirebaseUid: currentUser.uid
-  }).lean();
+  const commentIds = comments.map(c => c.id);
+  
+  const userReactions = await prisma.commentReaction.findMany({
+    where: {
+      commentId: { in: commentIds },
+      userId: currentUser.id
+    }
+  });
 
   const reactionsMap = {};
   userReactions.forEach(ur => {
-    reactionsMap[ur.commentId.toString()] = ur.type;
+    reactionsMap[ur.commentId] = ur.type;
   });
 
-  const ownerUids = Array.from(new Set(comments.map(c => c.ownerFirebaseUid)));
-  const users = await User.find({ firebaseUid: { $in: ownerUids } }).lean();
+  const ownerIds = Array.from(new Set(comments.map(c => c.ownerId)));
+  const users = await prisma.user.findMany({
+    where: { id: { in: ownerIds } }
+  });
+  
   const usersMap = {};
   for (const u of users) {
     let avatarUrl = u.photoURL || "";
@@ -31,16 +38,16 @@ const getCommentsForMemory = async ({ currentUser, memoryId }) => {
         console.warn("Failed to get signed URL for user profile during comments fetch:", err.message);
       }
     }
-    usersMap[u.firebaseUid] = {
+    usersMap[u.id] = {
       displayName: u.displayName || u.email?.split("@")[0] || "Alexander Mitchell",
       avatarUrl
     };
   }
 
   const formattedComments = await Promise.all(comments.map(async (c) => {
-    const userMeta = usersMap[c.ownerFirebaseUid] || {
-      displayName: c.ownerDisplayName || "Alexander Mitchell",
-      avatarUrl: c.ownerAvatarUrl || ""
+    const userMeta = usersMap[c.ownerId] || {
+      displayName: "Alexander Mitchell",
+      avatarUrl: ""
     };
     
     const timeDiff = Date.now() - new Date(c.createdAt).getTime();
@@ -52,15 +59,22 @@ const getCommentsForMemory = async ({ currentUser, memoryId }) => {
     else if (hours > 0) timeLabel = `${hours} hour${hours > 1 ? "s" : ""} ago`;
     else if (minutes > 0) timeLabel = `${minutes} minute${minutes > 1 ? "s" : ""} ago`;
 
+    let reactions = { like: 0, love: 0, haha: 0, wow: 0, sad: 0 };
+    if (c.reactionsCount) {
+      try {
+        reactions = typeof c.reactionsCount === "string" ? JSON.parse(c.reactionsCount) : c.reactionsCount;
+      } catch (_) {}
+    }
+
     return {
-      id: c._id.toString(),
+      id: c.id,
       author: userMeta.displayName,
       avatar: userMeta.avatarUrl,
       text: c.text,
       time: timeLabel,
-      reactions: c.reactionsCount || { like: 0, love: 0, haha: 0, wow: 0, sad: 0 },
-      userReaction: reactionsMap[c._id.toString()] || null,
-      parentCommentId: c.parentCommentId ? c.parentCommentId.toString() : null,
+      reactions,
+      userReaction: reactionsMap[c.id] || null,
+      parentCommentId: c.parentCommentId || null,
       createdAt: c.createdAt
     };
   }));
@@ -87,141 +101,112 @@ const getCommentsForMemory = async ({ currentUser, memoryId }) => {
 };
 
 const createComment = async ({ user, memoryId, text, parentCommentId }) => {
-  const memory = await Memory.findById(memoryId);
+  const memory = await prisma.memory.findUnique({
+    where: { id: memoryId }
+  });
   if (!memory) {
     const error = new Error("Memory not found");
     error.statusCode = 404;
     throw error;
   }
 
-  // Get user details for commenter metadata
-  const userDoc = await User.findOne({ firebaseUid: user.uid }).lean();
-  let ownerDisplayName = user.name || user.email?.split("@")[0] || "Alexander Mitchell";
-  let ownerAvatarUrl = user.picture || "";
-
-  if (userDoc) {
-    ownerDisplayName = userDoc.displayName || ownerDisplayName;
-    if (userDoc.photoKey) {
-      try {
-        ownerAvatarUrl = await getSignedFileUrl(userDoc.photoKey);
-      } catch (_) {}
-    } else if (userDoc.photoURL) {
-      ownerAvatarUrl = userDoc.photoURL;
+  const comment = await prisma.comment.create({
+    data: {
+      text,
+      memoryId,
+      ownerId: user.id,
+      parentCommentId: parentCommentId || null
     }
-  }
-
-  const comment = await Comment.create({
-    memoryId,
-    ownerFirebaseUid: user.uid,
-    ownerDisplayName,
-    ownerAvatarUrl,
-    text,
-    parentCommentId: parentCommentId || null
   });
 
   // Increment comments count on Memory
-  await Memory.findByIdAndUpdate(memoryId, { $inc: { comments: 1 } });
-
-  // Update memory snapshot inside Album if it exists
-  if (memory.albumId) {
-    const albumRepository = require("../albums/album.repository");
-    const memoryService = require("../memories/memory.service");
-    // Get updated serialized memory
-    const updatedMemory = await Memory.findById(memoryId);
-    const serializedMemory = await memoryService.getMemoryDetails({ currentUser: user, memoryId });
-    
-    // We build snap and update in album repo
-    const snap = {
-      id: serializedMemory.id,
-      ownerFirebaseUid: serializedMemory.ownerFirebaseUid,
-      ownerDisplayName: serializedMemory.ownerDisplayName,
-      ownerEmail: serializedMemory.ownerEmail,
-      ownerProfession: serializedMemory.ownerProfession,
-      ownerAvatarUrl: serializedMemory.ownerAvatarUrl,
-      title: serializedMemory.title,
-      description: serializedMemory.description,
-      tags: serializedMemory.tags,
-      category: serializedMemory.category,
-      privacy: serializedMemory.privacy,
-      type: serializedMemory.type,
-      mood: serializedMemory.mood,
-      date: serializedMemory.date,
-      likes: serializedMemory.likes,
-      comments: serializedMemory.comments,
-      color: serializedMemory.color,
-      mediaUrl: serializedMemory.mediaUrl,
-      thumbnailUrl: serializedMemory.thumbnailUrl,
-      mediaKey: serializedMemory.mediaKey,
-      mediaMimeType: serializedMemory.mediaMimeType,
-      mediaOriginalName: serializedMemory.mediaOriginalName,
-      mediaList: serializedMemory.mediaList,
-      backgroundId: serializedMemory.backgroundId,
-      fontId: serializedMemory.fontId,
-      albumTitle: serializedMemory.albumTitle,
-    };
-
-    await albumRepository.updateMemory({
-      albumId: memory.albumId,
-      ownerFirebaseUid: memory.ownerFirebaseUid,
-      memory: snap,
-    });
-  }
+  await prisma.memory.update({
+    where: { id: memoryId },
+    data: {
+      commentsCount: { increment: 1 }
+    }
+  });
 
   return comment;
 };
 
 const reactToComment = async ({ user, commentId, type }) => {
-  const comment = await Comment.findById(commentId);
+  const comment = await prisma.comment.findUnique({
+    where: { id: commentId }
+  });
   if (!comment) {
     const error = new Error("Comment not found");
     error.statusCode = 404;
     throw error;
   }
 
-  const existingReaction = await CommentReaction.findOne({
-    commentId,
-    userFirebaseUid: user.uid
+  const existingReaction = await prisma.commentReaction.findUnique({
+    where: {
+      commentId_userId: {
+        commentId,
+        userId: user.id
+      }
+    }
   });
 
   let userReaction = type;
+  
+  let reactions = { like: 0, love: 0, haha: 0, wow: 0, sad: 0 };
+  if (comment.reactionsCount) {
+    try {
+      reactions = typeof comment.reactionsCount === "string" 
+        ? JSON.parse(comment.reactionsCount) 
+        : comment.reactionsCount;
+    } catch (_) {}
+  }
+  // Safeguard keys
+  ["like", "love", "haha", "wow", "sad"].forEach(k => {
+    if (reactions[k] === undefined) reactions[k] = 0;
+  });
 
   if (existingReaction) {
     const oldType = existingReaction.type;
     if (oldType === type || !type) {
       // Toggle reaction off
-      await CommentReaction.deleteOne({ _id: existingReaction._id });
+      await prisma.commentReaction.delete({
+        where: { id: existingReaction.id }
+      });
       
-      const updateQuery = {};
-      updateQuery[`reactionsCount.${oldType}`] = -1;
-      await Comment.findByIdAndUpdate(commentId, { $inc: updateQuery });
-      
+      reactions[oldType] = Math.max(0, (reactions[oldType] || 1) - 1);
       userReaction = null;
     } else {
       // Change reaction type
-      existingReaction.type = type;
-      await existingReaction.save();
+      await prisma.commentReaction.update({
+        where: { id: existingReaction.id },
+        data: { type }
+      });
 
-      const updateQuery = {};
-      updateQuery[`reactionsCount.${oldType}`] = -1;
-      updateQuery[`reactionsCount.${type}`] = 1;
-      await Comment.findByIdAndUpdate(commentId, { $inc: updateQuery });
+      reactions[oldType] = Math.max(0, (reactions[oldType] || 1) - 1);
+      reactions[type] = (reactions[type] || 0) + 1;
     }
   } else if (type) {
     // Add new reaction
-    await CommentReaction.create({
-      commentId,
-      userFirebaseUid: user.uid,
-      type
+    await prisma.commentReaction.create({
+      data: {
+        commentId,
+        userId: user.id,
+        type
+      }
     });
 
-    const updateQuery = {};
-    updateQuery[`reactionsCount.${type}`] = 1;
-    await Comment.findByIdAndUpdate(commentId, { $inc: updateQuery });
+    reactions[type] = (reactions[type] || 0) + 1;
   }
 
-  const updatedComment = await Comment.findById(commentId).lean();
+  // Update in database
+  const updatedComment = await prisma.comment.update({
+    where: { id: commentId },
+    data: {
+      reactionsCount: reactions
+    }
+  });
+
   return {
-    reactions: updatedComment.reactionsCount || { like: 0, love: 0, haha: 0, wow: 0, sad: 0 },
+    reactions: updatedComment.reactionsCount,
     userReaction
   };
 };

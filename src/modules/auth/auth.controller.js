@@ -1,8 +1,14 @@
-const User = require("../user/user.model");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const admin = require("../../config/firebase");
+const prisma = require("../../config/prisma");
 const {
   uploadFileToS3,
   getSignedFileUrl,
 } = require("../../services/s3.service");
+
+const JWT_SECRET = process.env.JWT_SECRET || "spoken_odyssey_super_secret_key_12345";
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
 
 const normalizeString = (value) =>
   typeof value === "string" ? value.trim() : undefined;
@@ -28,96 +34,272 @@ const computeProfileCompleted = (user) =>
       user.defaultEntryPrivacy.trim()
   );
 
-const serializeUser = async (userDocument) => {
-  if (!userDocument) {
+const serializeUser = async (user) => {
+  if (!user) {
     return null;
   }
 
-  const user =
-    typeof userDocument.toObject === "function"
-      ? userDocument.toObject()
-      : { ...userDocument };
+  const result = { ...user };
 
   if (user.photoKey) {
     try {
-      user.photoURL = await getSignedFileUrl(user.photoKey);
+      result.photoURL = await getSignedFileUrl(user.photoKey);
     } catch (_) {}
   }
 
   if (user.coverKey) {
     try {
-      user.coverURL = await getSignedFileUrl(user.coverKey);
+      result.coverURL = await getSignedFileUrl(user.coverKey);
     } catch (_) {}
   } else if (!user.coverURL) {
-    user.coverURL = "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1200&q=80";
+    result.coverURL = "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1200&q=80";
   }
 
   try {
-    const Follow = require("../user/follow.model");
-    user.followersCount = await Follow.countDocuments({ followingId: user.firebaseUid });
-    user.followingCount = await Follow.countDocuments({ followerId: user.firebaseUid });
+    result.followersCount = await prisma.follow.count({
+      where: { followingId: user.id },
+    });
+    result.followingCount = await prisma.follow.count({
+      where: { followerId: user.id },
+    });
   } catch (err) {
     console.warn("Failed to get follow stats for user:", err.message);
-    user.followersCount = 0;
-    user.followingCount = 0;
+    result.followersCount = 0;
+    result.followingCount = 0;
   }
 
   const threeMinutesAgo = new Date(Date.now() - 3 * 60 * 1000);
-  user.isActive = user.lastActive ? new Date(user.lastActive) > threeMinutesAgo : false;
+  result.isActive = user.lastActive ? new Date(user.lastActive) > threeMinutesAgo : false;
 
-  return user;
+  // Add compatibility fields
+  result.firebaseUid = user.id;
+  result.uid = user.id;
+
+  return result;
 };
 
 /**
- * @desc    Sync Firebase user with MongoDB
- * @route   POST /api/auth/sync
- * @access  Private
+ * @desc    Register a new user (Email/Password)
+ * @route   POST /api/auth/register
+ * @access  Public
  */
-const syncUser = async (req, res) => {
+const register = async (req, res) => {
   try {
-    const { uid, email, name, picture } = req.user;
+    const { email, password, displayName } = req.body;
 
-    // Check if user exists
-    let user = await User.findOne({ firebaseUid: uid });
-
-    if (user) {
-      // Update existing user info
-      user.email = email || user.email;
-      user.displayName = name || user.displayName;
-      user.photoURL = picture || user.photoURL;
-      user.lastLogin = Date.now();
-      await user.save();
-    } else {
-      // Create new user
-      user = await User.create({
-        firebaseUid: uid,
-        email: email,
-        displayName: name,
-        photoURL: picture,
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Email and password are required",
       });
     }
 
-    res.status(200).json({
+    const emailLower = email.toLowerCase().trim();
+
+    // Check if user already exists
+    const existingUser = await prisma.user.findUnique({
+      where: { email: emailLower },
+    });
+
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: "User already exists with this email",
+      });
+    }
+
+    // Hash password
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
+    // Create user
+    const user = await prisma.user.create({
+      data: {
+        email: emailLower,
+        password: hashedPassword,
+        displayName: displayName || emailLower.split("@")[0],
+      },
+    });
+
+    // Generate JWT
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRES_IN }
+    );
+
+    res.status(201).json({
       success: true,
+      token,
       data: await serializeUser(user),
     });
   } catch (error) {
-    console.error("Sync User Error:", error.message);
+    console.error("Register Error:", error.message);
     res.status(500).json({
       success: false,
-      message: "Server Error during user sync",
+      message: "Server Error during registration",
     });
   }
 };
 
 /**
- * @desc    Update current user profile in MongoDB
+ * @desc    Login user (Email/Password)
+ * @route   POST /api/auth/login
+ * @access  Public
+ */
+const login = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Email and password are required",
+      });
+    }
+
+    const emailLower = email.toLowerCase().trim();
+
+    // Find user
+    const user = await prisma.user.findUnique({
+      where: { email: emailLower },
+    });
+
+    if (!user || !user.password) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid email or password",
+      });
+    }
+
+    // Check password
+    const isMatch = await bcrypt.compare(password, user.password);
+
+    if (!isMatch) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid email or password",
+      });
+    }
+
+    // Update last login
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { lastLogin: new Date() },
+    });
+
+    // Generate JWT
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRES_IN }
+    );
+
+    res.status(200).json({
+      success: true,
+      token,
+      data: await serializeUser(user),
+    });
+  } catch (error) {
+    console.error("Login Error:", error.message);
+    res.status(500).json({
+      success: false,
+      message: "Server Error during login",
+    });
+  }
+};
+
+/**
+ * @desc    Authenticate with Google ID token
+ * @route   POST /api/auth/google
+ * @access  Public
+ */
+
+const googleLogin = async (req, res) => {
+  try {
+    console.log("GOOGLE LOGIN BODY:", req.body);
+    const { googleToken } = req.body;
+
+    if (!googleToken) {
+      return res.status(400).json({
+        success: false,
+        message: "Google token is required",
+      });
+    }
+
+    // Verify token with Firebase Admin
+    const decodedToken = await admin.auth().verifyIdToken(googleToken);
+    const { uid: googleId, email, name, picture } = decodedToken;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email is required from Google login",
+      });
+    }
+
+    const emailLower = email.toLowerCase().trim();
+
+    let user = await prisma.user.findUnique({
+      where: { email: emailLower },
+    });
+
+    if (user) {
+      // Update google ID and info if empty
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          googleId: user.googleId || googleId,
+          displayName: user.displayName || name,
+          photoURL: user.photoURL || picture,
+          lastLogin: new Date(),
+        },
+      });
+    } else {
+      // Create new user
+      user = await prisma.user.create({
+        data: {
+          email: emailLower,
+          googleId: googleId,
+          displayName: name,
+          photoURL: picture,
+        },
+      });
+    }
+
+    // Generate JWT
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRES_IN }
+    );
+
+    res.status(200).json({
+      success: true,
+      token,
+      data: await serializeUser(user),
+    });
+  } catch (error) {
+    console.error("Google Login Error:", error.message);
+    res.status(400).json({
+      success: false,
+      message: "Authentication failed: Invalid Google token",
+    });
+  }
+};
+
+/**
+ * @desc    Update current user profile in PostgreSQL
  * @route   PUT /api/auth/profile
  * @access  Private
  */
 const updateProfile = async (req, res) => {
   try {
-    const user = await User.findOne({ firebaseUid: req.user.uid });
+    const userId = req.user.id;
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+    });
 
     if (!user) {
       return res.status(404).json({
@@ -165,30 +347,32 @@ const updateProfile = async (req, res) => {
       causes: normalizeString(req.body.causes),
     };
 
+    // Filter updates
+    const dataUpdate = {};
     Object.entries(updates).forEach(([key, value]) => {
       if (value !== undefined) {
-        user[key] = value;
+        dataUpdate[key] = value;
       }
     });
 
     if (Array.isArray(personalityQs)) {
-      user.personalityQs = personalityQs;
+      dataUpdate.personalityQs = personalityQs;
     }
 
     if (req.files) {
       if (req.files.profileImage?.[0]) {
         const { key } = await uploadFileToS3({
           file: req.files.profileImage[0],
-          folder: `profiles/${req.user.uid}/avatar`,
+          folder: `profiles/${userId}/avatar`,
         });
-        user.photoKey = key;
+        dataUpdate.photoKey = key;
       }
       if (req.files.coverImage?.[0]) {
         const { key } = await uploadFileToS3({
           file: req.files.coverImage[0],
-          folder: `profiles/${req.user.uid}/cover`,
+          folder: `profiles/${userId}/cover`,
         });
-        user.coverKey = key;
+        dataUpdate.coverKey = key;
       }
     }
 
@@ -196,24 +380,30 @@ const updateProfile = async (req, res) => {
     if (onboardingCompleted === "true") onboardingCompleted = true;
     if (onboardingCompleted === "false") onboardingCompleted = false;
     if (typeof onboardingCompleted === "boolean") {
-      user.onboardingCompleted = onboardingCompleted;
+      dataUpdate.onboardingCompleted = onboardingCompleted;
     }
+
+    // Merge updates temporarily to check for profile completeness
+    const mergedUser = { ...user, ...dataUpdate };
 
     let profileCompleted = req.body.profileCompleted;
     if (profileCompleted === "true") profileCompleted = true;
     if (profileCompleted === "false") profileCompleted = false;
     if (typeof profileCompleted === "boolean") {
-      user.profileCompleted =
-        profileCompleted && computeProfileCompleted(user);
+      dataUpdate.profileCompleted =
+        profileCompleted && computeProfileCompleted(mergedUser);
     } else {
-      user.profileCompleted = computeProfileCompleted(user);
+      dataUpdate.profileCompleted = computeProfileCompleted(mergedUser);
     }
 
-    await user.save();
+    const updatedUser = await prisma.user.update({
+      where: { id: userId },
+      data: dataUpdate,
+    });
 
     res.status(200).json({
       success: true,
-      data: await serializeUser(user),
+      data: await serializeUser(updatedUser),
     });
   } catch (error) {
     console.error("Update Profile Error:", error.message);
@@ -225,13 +415,15 @@ const updateProfile = async (req, res) => {
 };
 
 /**
- * @desc    Get current user profile from MongoDB
+ * @desc    Get current user profile from PostgreSQL
  * @route   GET /api/auth/me
  * @access  Private
  */
 const getMe = async (req, res) => {
   try {
-    const user = await User.findOne({ firebaseUid: req.user.uid });
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+    });
 
     if (!user) {
       return res.status(404).json({
@@ -253,46 +445,130 @@ const getMe = async (req, res) => {
 };
 
 /**
- * @desc    Mock email verification for testing using code 555555
- * @route   POST /api/auth/verify-mock
- * @access  Private
+ * @desc    Request password reset link
+ * @route   POST /api/auth/forgot-password
+ * @access  Public
  */
-const verifyMock = async (req, res) => {
+const forgotPassword = async (req, res) => {
   try {
-    const { code } = req.body;
-    if (code !== "555555") {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid verification code. Please use 555555.",
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ success: false, message: "Email is required" });
+    }
+
+    const emailLower = email.toLowerCase().trim();
+    const user = await prisma.user.findUnique({ where: { email: emailLower } });
+
+    // Security: Do not confirm if account exists to prevent email harvesting
+    if (!user) {
+      return res.status(200).json({
+        success: true,
+        message: "If that email exists in our system, a password reset link has been sent.",
       });
     }
 
-    const admin = require("../../config/firebase");
-    if (!admin.apps.length) {
-      throw new Error("Firebase Admin not initialized");
+    // Generate reset token
+    const crypto = require("crypto");
+    const resetTokenPlain = crypto.randomBytes(32).toString("hex");
+    const resetTokenHashed = crypto.createHash("sha256").update(resetTokenPlain).digest("hex");
+    const resetExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour expiry
+
+    // Save token to database
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        passwordResetToken: resetTokenHashed,
+        passwordResetExpires: resetExpires,
+      },
+    });
+
+    const resetUrl = `${process.env.CLIENT_URL || "http://localhost:3000"}/auth/reset-password?token=${resetTokenPlain}&email=${emailLower}`;
+
+    // Send email via email service
+    const { sendPasswordResetEmail } = require("../../services/email.service");
+    await sendPasswordResetEmail(emailLower, resetUrl);
+
+    res.status(200).json({
+      success: true,
+      message: "If that email exists in our system, a password reset link has been sent.",
+      ...(process.env.NODE_ENV !== "production" ? { dev_link: resetUrl } : {}),
+    });
+  } catch (error) {
+    console.error("Forgot Password Error:", error.message);
+    res.status(500).json({
+      success: false,
+      message: "An error occurred while processing forgot password request",
+    });
+  }
+};
+
+/**
+ * @desc    Reset password using reset token
+ * @route   POST /api/auth/reset-password
+ * @access  Public
+ */
+const resetPassword = async (req, res) => {
+  try {
+    const { token, email, password } = req.body;
+    if (!token || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Token, email, and new password are required",
+      });
     }
 
-    // Set emailVerified to true in Firebase Auth using Admin SDK
-    await admin.auth().updateUser(req.user.uid, {
-      emailVerified: true,
+    const emailLower = email.toLowerCase().trim();
+    const crypto = require("crypto");
+    const resetTokenHashed = crypto.createHash("sha256").update(token).digest("hex");
+
+    const user = await prisma.user.findUnique({
+      where: { email: emailLower },
+    });
+
+    if (
+      !user ||
+      user.passwordResetToken !== resetTokenHashed ||
+      new Date() > new Date(user.passwordResetExpires)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Token is invalid or has expired",
+      });
+    }
+
+    // Hash the new password
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
+    // Save updated password and clear reset token
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        password: hashedPassword,
+        passwordResetToken: null,
+        passwordResetExpires: null,
+      },
     });
 
     res.status(200).json({
       success: true,
-      message: "Email verified successfully.",
+      message: "Password reset successfully. You can now log in with your new password.",
     });
   } catch (error) {
-    console.error("Verify Mock Error:", error.message);
+    console.error("Reset Password Error:", error.message);
     res.status(500).json({
       success: false,
-      message: "Failed to verify email: " + error.message,
+      message: "An error occurred while resetting password",
     });
   }
 };
 
 module.exports = {
-  syncUser,
+  register,
+  login,
+  googleLogin,
   getMe,
   updateProfile,
-  verifyMock,
+  forgotPassword,
+  resetPassword,
 };

@@ -34,6 +34,10 @@ const createMemory = async (req, res) => {
       backgroundId: req.body.backgroundId,
       fontId: req.body.fontId,
       files: req.files || (req.file ? [req.file] : []),
+      mediaKey: req.body.mediaKey,
+      mediaMimeType: req.body.mediaMimeType,
+      mediaOriginalName: req.body.mediaOriginalName,
+      mediaList: req.body.mediaList,
     });
 
     res.status(201).json({
@@ -118,6 +122,10 @@ const updateMemory = async (req, res) => {
       backgroundId: req.body.backgroundId,
       fontId: req.body.fontId,
       files: req.files || (req.file ? [req.file] : []),
+      mediaKey: req.body.mediaKey,
+      mediaMimeType: req.body.mediaMimeType,
+      mediaOriginalName: req.body.mediaOriginalName,
+      mediaList: req.body.mediaList,
     });
 
     res.status(200).json({

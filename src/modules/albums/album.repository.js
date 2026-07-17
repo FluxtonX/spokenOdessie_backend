@@ -1,48 +1,57 @@
-const Album = require("./album.model");
+const prisma = require("../../config/prisma");
 
-const findByOwnerFirebaseUid = (ownerFirebaseUid) =>
-  Album.find({ ownerFirebaseUid }).sort({ createdAt: -1 }).lean();
+const findByOwnerFirebaseUid = (ownerId) =>
+  prisma.album.findMany({
+    where: { ownerId },
+    orderBy: { createdAt: "desc" },
+  });
 
-const findByOwnerAndPrivacy = (ownerFirebaseUid, allowedPrivacy) =>
-  Album.find({ ownerFirebaseUid, privacy: { $in: allowedPrivacy } })
-    .sort({ createdAt: -1 })
-    .lean();
-
-const create = (payload) => Album.create(payload);
-
-const findByIdAndOwnerFirebaseUid = (id, ownerFirebaseUid) =>
-  Album.findOne({ _id: id, ownerFirebaseUid });
-
-const addMemory = ({ albumId, ownerFirebaseUid, memory }) =>
-  Album.findOneAndUpdate(
-    { _id: albumId, ownerFirebaseUid },
-    {
-      $push: { memories: memory },
-      $inc: { entries: 1 },
+const findByOwnerAndPrivacy = (ownerId, allowedPrivacy) =>
+  prisma.album.findMany({
+    where: {
+      ownerId,
+      privacy: { in: allowedPrivacy },
     },
-    { new: true }
-  );
+    orderBy: { createdAt: "desc" },
+  });
 
-const removeMemory = ({ albumId, ownerFirebaseUid, memoryId }) =>
-  Album.findOneAndUpdate(
-    { _id: albumId, ownerFirebaseUid },
-    {
-      $pull: { memories: { id: memoryId } },
-      $inc: { entries: -1 },
+const create = (payload) =>
+  prisma.album.create({
+    data: {
+      ownerId: payload.ownerFirebaseUid,
+      title: payload.title,
+      subtitle: payload.subtitle || "",
+      privacy: payload.privacy || "Private",
+      coverImageKey: payload.coverImageKey || null,
+      entries: 0,
     },
-    { new: true }
-  );
+  });
 
-const updateMemory = ({ albumId, ownerFirebaseUid, memory }) =>
-  Album.findOneAndUpdate(
-    { _id: albumId, ownerFirebaseUid, "memories.id": memory.id },
-    {
-      $set: {
-        "memories.$": memory,
-      },
+const findByIdAndOwnerFirebaseUid = (id, ownerId) =>
+  prisma.album.findFirst({
+    where: { id, ownerId },
+  });
+
+const addMemory = ({ albumId }) =>
+  prisma.album.update({
+    where: { id: albumId },
+    data: {
+      entries: { increment: 1 },
     },
-    { new: true }
-  );
+  });
+
+const removeMemory = ({ albumId }) =>
+  prisma.album.update({
+    where: { id: albumId },
+    data: {
+      entries: { decrement: 1 },
+    },
+  });
+
+const updateMemory = () => {
+  // No-op in PostgreSQL since relational mapping updates the memory record directly.
+  return null;
+};
 
 module.exports = {
   findByOwnerFirebaseUid,

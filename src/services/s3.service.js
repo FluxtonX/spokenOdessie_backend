@@ -93,8 +93,37 @@ const getSignedFileUrl = async (key) => {
   );
 };
 
+const getUploadPresignedUrl = async ({ fileName, fileType, folder = "memories" }) => {
+  if (!s3BucketName) {
+    throw new Error("AWS_S3_BUCKET_NAME is not configured");
+  }
+
+  const timestamp = Date.now();
+  const cleanName = sanitizeFileName(fileName);
+  const key = `${folder}/${timestamp}-${cleanName}`;
+
+  try {
+    const command = new PutObjectCommand({
+      Bucket: s3BucketName,
+      Key: key,
+      ContentType: fileType,
+    });
+
+    const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 900 });
+
+    return {
+      uploadUrl,
+      key,
+    };
+  } catch (error) {
+    console.error("Failed to generate presigned upload URL:", error.message);
+    throw error;
+  }
+};
+
 module.exports = {
   uploadFileToS3,
   uploadImageToS3: uploadFileToS3,
   getSignedFileUrl,
+  getUploadPresignedUrl,
 };

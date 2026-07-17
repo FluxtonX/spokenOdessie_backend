@@ -1,9 +1,10 @@
 const repository = require("./album.repository");
+const prisma = require("../../config/prisma");
 const { uploadImageToS3, getSignedFileUrl } = require("../../services/s3.service");
 
 const getOwnerDisplayName = (user) => {
-  if (user.name && user.name.trim()) {
-    return user.name.trim();
+  if (user.displayName && user.displayName.trim()) {
+    return user.displayName.trim();
   }
 
   if (user.email) {
@@ -13,21 +14,27 @@ const getOwnerDisplayName = (user) => {
   return "Spoken Odyssey User";
 };
 
-const serializeAlbum = async (albumDoc, currentUser) => {
-  const album =
-    typeof albumDoc.toObject === "function" ? albumDoc.toObject() : albumDoc;
+const serializeAlbum = async (album, currentUser) => {
+  if (!album) return null;
 
   // Determine relationship
-  const isOwner = currentUser && album.ownerFirebaseUid === currentUser.uid;
+  const isOwner = currentUser && album.ownerId === currentUser.id;
   let isFamily = false;
+  
   if (currentUser && !isOwner) {
-    const User = require("../user/user.model");
-    const owner = await User.findOne({ firebaseUid: album.ownerFirebaseUid });
-    isFamily = owner?.familyMembers?.includes(currentUser.uid) || false;
+    const [u1, u2] = [currentUser.id, album.ownerId].sort();
+    const familyConnection = await prisma.familyConnection.findUnique({
+      where: { user1Id_user2Id: { user1Id: u1, user2Id: u2 } }
+    });
+    isFamily = !!familyConnection;
   }
 
-  // Filter memories based on relationship
-  let memories = Array.isArray(album.memories) ? album.memories : [];
+  // Fetch memories associated with this album dynamically
+  let memories = await prisma.memory.findMany({
+    where: { albumId: album.id }
+  });
+
+  // Filter memories based on privacy relationship
   if (!isOwner) {
     memories = memories.filter((memory) => {
       const memoryPrivacy = memory.privacy || "Private";
@@ -35,20 +42,42 @@ const serializeAlbum = async (albumDoc, currentUser) => {
       if (memoryPrivacy === "Family" || memoryPrivacy === "Family Circle") {
         return isFamily;
       }
-      return false; // Hide Private memories from everyone else
+      return false; // Hide Private memories from non-owners
     });
   }
 
   const mappedMemories = await Promise.all(
-    memories.map(async (memory) => ({
-      ...memory,
-      mediaUrl: await getSignedFileUrl(memory.mediaKey),
-      thumbnailUrl: await getSignedFileUrl(memory.thumbnailKey),
-    }))
+    memories.map(async (memory) => {
+      // Resolve media list URLs if present
+      let mediaListWithUrls = [];
+      if (memory.mediaList) {
+        let parsedMedia = [];
+        try {
+          parsedMedia = typeof memory.mediaList === "string" ? JSON.parse(memory.mediaList) : memory.mediaList;
+        } catch (_) {}
+        if (Array.isArray(parsedMedia)) {
+          mediaListWithUrls = await Promise.all(
+            parsedMedia.map(async (item) => ({
+              ...item,
+              mediaUrl: await getSignedFileUrl(item.mediaKey),
+              thumbnailUrl: await getSignedFileUrl(item.thumbnailKey),
+            }))
+          );
+        }
+      }
+
+      return {
+        ...memory,
+        mediaUrl: await getSignedFileUrl(memory.mediaKey),
+        thumbnailUrl: await getSignedFileUrl(memory.thumbnailKey),
+        mediaList: mediaListWithUrls,
+        id: memory.id,
+      };
+    })
   );
 
   return {
-    id: album._id.toString(),
+    id: album.id,
     title: album.title,
     subtitle: album.subtitle || "",
     privacy: album.privacy || "Private",
@@ -60,22 +89,26 @@ const serializeAlbum = async (albumDoc, currentUser) => {
     memories: mappedMemories,
     createdAt: album.createdAt,
     updatedAt: album.updatedAt,
+    ownerFirebaseUid: album.ownerId, // compatibility
+    ownerId: album.ownerId,
   };
 };
 
 const getAlbumsByUser = async (currentUser, targetUserId) => {
-  const targetUid = targetUserId || currentUser.uid;
+  const targetUid = targetUserId || currentUser.id;
 
-  if (targetUid === currentUser.uid) {
-    const albums = await repository.findByOwnerFirebaseUid(currentUser.uid);
+  if (targetUid === currentUser.id) {
+    const albums = await repository.findByOwnerFirebaseUid(currentUser.id);
     return Promise.all(albums.map((album) => serializeAlbum(album, currentUser)));
   }
 
-  const User = require("../user/user.model");
-  const targetUser = await User.findOne({ firebaseUid: targetUid });
-  const isFamily = targetUser?.familyMembers?.includes(currentUser.uid) || false;
+  const [u1, u2] = [currentUser.id, targetUid].sort();
+  const familyConnection = await prisma.familyConnection.findUnique({
+    where: { user1Id_user2Id: { user1Id: u1, user2Id: u2 } }
+  });
+  const isFamily = !!familyConnection;
 
-  // Get all albums of target user and serialize them with privacy filtering applied
+  // Get all albums of target user and serialize them with privacy filtering
   const albums = await repository.findByOwnerFirebaseUid(targetUid);
   const serialized = await Promise.all(albums.map((album) => serializeAlbum(album, currentUser)));
 
@@ -85,8 +118,7 @@ const getAlbumsByUser = async (currentUser, targetUserId) => {
     if (albumPrivacy === "Public") return true;
     if (albumPrivacy === "Family" && isFamily) return true;
     
-    // Private album or family album where user isn't family:
-    // Only show if the album has at least one memory visible to them!
+    // Private/Family album where user isn't family: only show if the album contains at least one memory visible to them
     if (album.memories.length > 0) return true;
 
     return false;
@@ -111,7 +143,7 @@ const createAlbum = async ({ user, title, subtitle, privacy, coverUrl, file }) =
     try {
       const upload = await uploadImageToS3({
         file,
-        folder: `albums/${user.uid}`,
+        folder: `albums/${user.id}`,
       });
       coverImageKey = upload.key;
     } catch (error) {
@@ -122,19 +154,27 @@ const createAlbum = async ({ user, title, subtitle, privacy, coverUrl, file }) =
     }
   }
 
+  // Retrieve user email/display name for caching
+  const userDoc = await prisma.user.findUnique({ where: { id: user.id } });
+
   const album = await repository.create({
-    ownerFirebaseUid: user.uid,
-    ownerDisplayName: getOwnerDisplayName(user),
-    ownerEmail: user.email || "",
+    ownerFirebaseUid: user.id,
+    ownerDisplayName: getOwnerDisplayName(userDoc || user),
+    ownerEmail: user.email || userDoc?.email || "",
     title: normalizedTitle,
     subtitle: normalizedSubtitle,
     privacy: normalizedPrivacy,
     coverImageKey,
-    entries: 0,
-    memories: [],
   });
 
-  const serializedAlbum = await serializeAlbum(album, user);
+  // Attach display fields manually since we just created it
+  const albumData = {
+    ...album,
+    ownerDisplayName: getOwnerDisplayName(userDoc || user),
+    ownerEmail: user.email || userDoc?.email || "",
+  };
+
+  const serializedAlbum = await serializeAlbum(albumData, user);
 
   if (coverUploadWarning) {
     serializedAlbum.coverUploadWarning = coverUploadWarning;
@@ -144,7 +184,7 @@ const createAlbum = async ({ user, title, subtitle, privacy, coverUrl, file }) =
 };
 
 const updateAlbum = async ({ user, albumId, title, subtitle, privacy, coverUrl, file }) => {
-  const album = await repository.findByIdAndOwnerFirebaseUid(albumId, user.uid);
+  const album = await repository.findByIdAndOwnerFirebaseUid(albumId, user.id);
 
   if (!album) {
     const error = new Error("Album could not be found.");
@@ -169,7 +209,7 @@ const updateAlbum = async ({ user, albumId, title, subtitle, privacy, coverUrl, 
     try {
       const upload = await uploadImageToS3({
         file,
-        folder: `albums/${user.uid}`,
+        folder: `albums/${user.id}`,
       });
       coverImageKey = upload.key;
     } catch (error) {
@@ -180,14 +220,25 @@ const updateAlbum = async ({ user, albumId, title, subtitle, privacy, coverUrl, 
     }
   }
 
-  album.title = normalizedTitle;
-  album.subtitle = normalizedSubtitle;
-  album.privacy = normalizedPrivacy;
-  album.coverImageKey = coverImageKey;
+  const userDoc = await prisma.user.findUnique({ where: { id: user.id } });
 
-  await album.save();
+  const updated = await prisma.album.update({
+    where: { id: albumId },
+    data: {
+      title: normalizedTitle,
+      subtitle: normalizedSubtitle,
+      privacy: normalizedPrivacy,
+      coverImageKey: coverImageKey,
+    }
+  });
 
-  const serializedAlbum = await serializeAlbum(album, user);
+  const albumData = {
+    ...updated,
+    ownerDisplayName: getOwnerDisplayName(userDoc || user),
+    ownerEmail: user.email || userDoc?.email || "",
+  };
+
+  const serializedAlbum = await serializeAlbum(albumData, user);
 
   if (coverUploadWarning) {
     serializedAlbum.coverUploadWarning = coverUploadWarning;
@@ -197,23 +248,33 @@ const updateAlbum = async ({ user, albumId, title, subtitle, privacy, coverUrl, 
 };
 
 const getAlbumDetails = async ({ currentUser, albumId }) => {
-  const Album = require("./album.model");
-  const album = await Album.findById(albumId);
+  const album = await prisma.album.findUnique({
+    where: { id: albumId }
+  });
   if (!album) {
     const error = new Error("Album could not be found.");
     error.statusCode = 404;
     throw error;
   }
 
-  const serialized = await serializeAlbum(album, currentUser);
+  const userDoc = await prisma.user.findUnique({ where: { id: album.ownerId } });
+  const albumData = {
+    ...album,
+    ownerDisplayName: getOwnerDisplayName(userDoc),
+    ownerEmail: userDoc?.email || "",
+  };
+
+  const serialized = await serializeAlbum(albumData, currentUser);
 
   // Check ownership
-  const isOwner = album.ownerFirebaseUid === currentUser.uid;
+  const isOwner = album.ownerId === currentUser.id;
   if (isOwner) return serialized;
 
-  const User = require("../user/user.model");
-  const owner = await User.findOne({ firebaseUid: album.ownerFirebaseUid });
-  const isFamily = owner?.familyMembers?.includes(currentUser.uid) || false;
+  const [u1, u2] = [currentUser.id, album.ownerId].sort();
+  const familyConnection = await prisma.familyConnection.findUnique({
+    where: { user1Id_user2Id: { user1Id: u1, user2Id: u2 } }
+  });
+  const isFamily = !!familyConnection;
 
   const albumPrivacy = album.privacy || "Private";
   const hasVisibleMemories = serialized.memories.length > 0;
