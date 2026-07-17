@@ -3,14 +3,14 @@ const fs = require("fs");
 const ffmpeg = require("fluent-ffmpeg");
 const ffmpegPath = require("ffmpeg-static");
 const memoryRepository = require("./memory.repository");
-const albumRepository = require("../albums/album.repository");
+const prisma = require("../../config/prisma");
 const { uploadFileToS3, getSignedFileUrl } = require("../../services/s3.service");
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 const getOwnerDisplayName = (user) => {
-  if (user.name && user.name.trim()) {
-    return user.name.trim();
+  if (user.displayName && user.displayName.trim()) {
+    return user.displayName.trim();
   }
 
   if (user.email) {
@@ -65,19 +65,26 @@ const normalizeOccurredAt = (dateValue) => {
 };
 
 const serializeMemory = async (memoryDoc, currentUser = null) => {
-  const memory =
-    typeof memoryDoc.toObject === "function" ? memoryDoc.toObject() : memoryDoc;
+  if (!memoryDoc) return null;
 
-  const mediaListWithUrls = await Promise.all(
-    (memory.mediaList || []).map(async (item) => ({
-      mediaKey: item.mediaKey,
-      thumbnailKey: item.thumbnailKey,
-      mediaOriginalName: item.mediaOriginalName || "",
-      mediaMimeType: item.mediaMimeType || "",
-      mediaUrl: await getSignedFileUrl(item.mediaKey),
-      thumbnailUrl: await getSignedFileUrl(item.thumbnailKey),
-    }))
-  );
+  const memory = { ...memoryDoc };
+
+  let mediaListWithUrls = [];
+  if (memory.mediaList) {
+    let parsedMedia = [];
+    try {
+      parsedMedia = typeof memory.mediaList === "string" ? JSON.parse(memory.mediaList) : memory.mediaList;
+    } catch (_) {}
+    if (Array.isArray(parsedMedia)) {
+      mediaListWithUrls = await Promise.all(
+        parsedMedia.map(async (item) => ({
+          ...item,
+          mediaUrl: await getSignedFileUrl(item.mediaKey),
+          thumbnailUrl: await getSignedFileUrl(item.thumbnailKey),
+        }))
+      );
+    }
+  }
 
   let ownerDisplayName = memory.ownerDisplayName || "";
   let ownerEmail = memory.ownerEmail || "";
@@ -85,15 +92,12 @@ const serializeMemory = async (memoryDoc, currentUser = null) => {
   let ownerAvatarUrl = "";
 
   try {
-    const User = require("../user/user.model");
-    const userDoc = await User.findOne({ firebaseUid: memory.ownerFirebaseUid }).lean();
+    const userDoc = await prisma.user.findUnique({
+      where: { id: memory.ownerId }
+    });
     if (userDoc) {
-      if (!ownerDisplayName) {
-        ownerDisplayName = userDoc.displayName || userDoc.email?.split("@")[0] || "Alexander Mitchell";
-      }
-      if (!ownerEmail) {
-        ownerEmail = userDoc.email || "";
-      }
+      ownerDisplayName = userDoc.displayName || userDoc.email.split("@")[0] || "Alexander Mitchell";
+      ownerEmail = userDoc.email || "";
       ownerProfession = userDoc.profession || "";
       if (userDoc.photoKey) {
         ownerAvatarUrl = await getSignedFileUrl(userDoc.photoKey);
@@ -112,32 +116,39 @@ const serializeMemory = async (memoryDoc, currentUser = null) => {
   // Load reactions
   let userReaction = null;
   const reactionsCount = { heart: 0, like: 0, wow: 0, haha: 0, angry: 0 };
+  
   try {
-    const PostReaction = require("./postReaction.model");
     if (currentUser) {
-      const activeReact = await PostReaction.findOne({
-        memoryId: memory._id,
-        userFirebaseUid: currentUser.uid || currentUser.firebaseUid
-      }).lean();
+      const activeReact = await prisma.postReaction.findUnique({
+        where: {
+          memoryId_userId: {
+            memoryId: memory.id,
+            userId: currentUser.id,
+          }
+        }
+      });
       if (activeReact) {
         userReaction = activeReact.type;
       }
     }
 
-    const stats = await PostReaction.aggregate([
-      { $match: { memoryId: memory._id } },
-      { $group: { _id: "$type", count: { $sum: 1 } } }
-    ]);
-    stats.forEach(s => {
-      reactionsCount[s._id] = s.count;
+    const allReactions = await prisma.postReaction.findMany({
+      where: { memoryId: memory.id }
+    });
+    
+    allReactions.forEach(r => {
+      if (reactionsCount[r.type] !== undefined) {
+        reactionsCount[r.type]++;
+      }
     });
   } catch (err) {
     console.warn("Failed to load reaction stats in serializeMemory:", err.message);
   }
 
   return {
-    id: memory._id.toString(),
-    ownerFirebaseUid: memory.ownerFirebaseUid || "",
+    id: memory.id,
+    ownerFirebaseUid: memory.ownerId || "",
+    ownerId: memory.ownerId || "",
     title: memory.title,
     description: memory.description || "",
     tags: Array.isArray(memory.tags) ? memory.tags : [],
@@ -146,7 +157,7 @@ const serializeMemory = async (memoryDoc, currentUser = null) => {
     privacy: memory.privacy || "Private",
     type: memory.type || "Text",
     status: memory.status || "draft",
-    albumId: memory.albumId ? memory.albumId.toString() : null,
+    albumId: memory.albumId || null,
     albumTitle: memory.albumTitle || "",
     date: memory.occurredAt,
     mediaKey: memory.mediaKey || null,
@@ -156,7 +167,7 @@ const serializeMemory = async (memoryDoc, currentUser = null) => {
     thumbnailUrl: await getSignedFileUrl(memory.thumbnailKey),
     mediaList: mediaListWithUrls,
     likes: typeof memory.likes === "number" ? memory.likes : 0,
-    comments: typeof memory.comments === "number" ? memory.comments : 0,
+    comments: typeof memory.commentsCount === "number" ? memory.commentsCount : 0,
     shares: typeof memory.shares === "number" ? memory.shares : 0,
     reactions: reactionsCount,
     userReaction,
@@ -172,49 +183,19 @@ const serializeMemory = async (memoryDoc, currentUser = null) => {
   };
 };
 
-const buildAlbumMemorySnapshot = (serializedMemory) => ({
-  id: serializedMemory.id,
-  ownerFirebaseUid: serializedMemory.ownerFirebaseUid,
-  ownerDisplayName: serializedMemory.ownerDisplayName,
-  ownerEmail: serializedMemory.ownerEmail,
-  ownerProfession: serializedMemory.ownerProfession,
-  ownerAvatarUrl: serializedMemory.ownerAvatarUrl,
-  title: serializedMemory.title,
-  description: serializedMemory.description,
-  tags: serializedMemory.tags,
-  category: serializedMemory.category,
-  privacy: serializedMemory.privacy,
-  type: serializedMemory.type,
-  mood: serializedMemory.mood,
-  date: serializedMemory.date,
-  likes: serializedMemory.likes,
-  comments: serializedMemory.comments,
-  shares: serializedMemory.shares,
-  reactions: serializedMemory.reactions,
-  userReaction: serializedMemory.userReaction,
-  color: serializedMemory.color,
-  mediaUrl: serializedMemory.mediaUrl,
-  thumbnailUrl: serializedMemory.thumbnailUrl,
-  mediaKey: serializedMemory.mediaKey,
-  mediaMimeType: serializedMemory.mediaMimeType,
-  mediaOriginalName: serializedMemory.mediaOriginalName,
-  mediaList: serializedMemory.mediaList,
-  backgroundId: serializedMemory.backgroundId,
-  fontId: serializedMemory.fontId,
-  albumTitle: serializedMemory.albumTitle,
-});
-
 const getMemoriesByUser = async (currentUser, targetUserId) => {
-  const targetUid = targetUserId || currentUser.uid;
+  const targetUid = targetUserId || currentUser.id;
 
-  if (targetUid === currentUser.uid) {
-    const memories = await memoryRepository.findByOwnerFirebaseUid(currentUser.uid);
+  if (targetUid === currentUser.id) {
+    const memories = await memoryRepository.findByOwnerFirebaseUid(currentUser.id);
     return Promise.all(memories.map((memory) => serializeMemory(memory, currentUser)));
   }
 
-  const User = require("../user/user.model");
-  const targetUser = await User.findOne({ firebaseUid: targetUid });
-  const isFamily = targetUser?.familyMembers?.includes(currentUser.uid);
+  const [u1, u2] = [currentUser.id, targetUid].sort();
+  const familyConnection = await prisma.familyConnection.findUnique({
+    where: { user1Id_user2Id: { user1Id: u1, user2Id: u2 } }
+  });
+  const isFamily = !!familyConnection;
 
   const allowedPrivacy = ["Public"];
   if (isFamily) {
@@ -325,10 +306,13 @@ const createMemory = async ({
   fontId,
   files,
   file,
+  mediaKey,
+  mediaMimeType,
+  mediaOriginalName,
+  mediaList,
 }) => {
   const normalizedTitle = typeof title === "string" ? title.trim() : "";
-  const normalizedDescription =
-    typeof description === "string" ? description.trim() : "";
+  const normalizedDescription = typeof description === "string" ? description.trim() : "";
   const normalizedStatus = normalizeStatus(status);
   const normalizedTags = normalizeTags(tags);
 
@@ -340,7 +324,9 @@ const createMemory = async ({
 
   let album = null;
   if (albumId) {
-    album = await albumRepository.findByIdAndOwnerFirebaseUid(albumId, user.uid);
+    album = await prisma.album.findFirst({
+      where: { id: albumId, ownerId: user.id }
+    });
     if (!album) {
       const error = new Error("Selected album could not be found.");
       error.statusCode = 404;
@@ -354,7 +340,7 @@ const createMemory = async ({
   if (files && files.length > 0) {
     for (const f of files) {
       try {
-        const mediaItem = await uploadAndProcessMedia(f, user.uid);
+        const mediaItem = await uploadAndProcessMedia(f, user.id);
         if (mediaItem.mediaKey) {
           uploadedMediaList.push(mediaItem);
         }
@@ -365,13 +351,25 @@ const createMemory = async ({
     }
   } else if (file) {
     try {
-      const mediaItem = await uploadAndProcessMedia(file, user.uid);
+      const mediaItem = await uploadAndProcessMedia(file, user.id);
       if (mediaItem.mediaKey) {
         uploadedMediaList.push(mediaItem);
       }
     } catch (err) {
       console.error("Failed to upload single file:", err);
       mediaUploadWarning = "Failed to upload the file.";
+    }
+  } else if (mediaKey) {
+    uploadedMediaList.push({
+      mediaKey,
+      thumbnailKey: null,
+      mediaOriginalName: mediaOriginalName || "file",
+      mediaMimeType: mediaMimeType || "",
+    });
+  } else if (mediaList) {
+    const list = typeof mediaList === "string" ? JSON.parse(mediaList) : mediaList;
+    if (Array.isArray(list)) {
+      uploadedMediaList.push(...list);
     }
   }
 
@@ -385,10 +383,12 @@ const createMemory = async ({
   }
   const finalTags = Array.from(new Set([...normalizedTags, ...autoTags]));
 
+  const userDoc = await prisma.user.findUnique({ where: { id: user.id } });
+
   const memory = await memoryRepository.create({
-    ownerFirebaseUid: user.uid,
-    ownerDisplayName: getOwnerDisplayName(user),
-    ownerEmail: user.email || "",
+    ownerFirebaseUid: user.id,
+    ownerDisplayName: getOwnerDisplayName(userDoc || user),
+    ownerEmail: user.email || userDoc?.email || "",
     title: normalizedTitle,
     description: normalizedDescription,
     tags: finalTags,
@@ -396,7 +396,7 @@ const createMemory = async ({
     privacy: typeof privacy === "string" ? privacy.trim() || "Private" : "Private",
     type: typeof type === "string" ? type.trim() || "Text" : "Text",
     status: normalizedStatus,
-    albumId: album ? album._id : null,
+    albumId: album ? album.id : null,
     albumTitle: album?.title || "",
     occurredAt: normalizeOccurredAt(occurredAt),
     mediaKey: uploadedMediaList[0]?.mediaKey || null,
@@ -412,10 +412,9 @@ const createMemory = async ({
   const serializedMemory = await serializeMemory(memory, user);
 
   if (normalizedStatus === "published" && album) {
-    await albumRepository.addMemory({
-      albumId: album._id,
-      ownerFirebaseUid: user.uid,
-      memory: buildAlbumMemorySnapshot(serializedMemory),
+    await prisma.album.update({
+      where: { id: album.id },
+      data: { entries: { increment: 1 } }
     });
   }
 
@@ -426,10 +425,23 @@ const createMemory = async ({
   return serializedMemory;
 };
 
-const updateMemory = async ({ user, memoryId, title, description, color, backgroundId, fontId, files }) => {
+const updateMemory = async ({
+  user,
+  memoryId,
+  title,
+  description,
+  color,
+  backgroundId,
+  fontId,
+  files,
+  mediaKey,
+  mediaMimeType,
+  mediaOriginalName,
+  mediaList,
+}) => {
   const memory = await memoryRepository.findByIdAndOwnerFirebaseUid(
     memoryId,
-    user.uid
+    user.id
   );
 
   if (!memory) {
@@ -438,12 +450,8 @@ const updateMemory = async ({ user, memoryId, title, description, color, backgro
     throw error;
   }
 
-  const normalizedTitle =
-    typeof title === "string" ? title.trim() : memory.title || "";
-  const normalizedDescription =
-    typeof description === "string"
-      ? description.trim()
-      : memory.description || "";
+  const normalizedTitle = typeof title === "string" ? title.trim() : memory.title || "";
+  const normalizedDescription = typeof description === "string" ? description.trim() : memory.description || "";
 
   if (!normalizedTitle) {
     const error = new Error("Memory title is required.");
@@ -463,7 +471,7 @@ const updateMemory = async ({ user, memoryId, title, description, color, backgro
   if (files && files.length > 0) {
     for (const f of files) {
       try {
-        const mediaItem = await uploadAndProcessMedia(f, user.uid);
+        const mediaItem = await uploadAndProcessMedia(f, user.id);
         if (mediaItem.mediaKey) {
           uploadedMediaList.push(mediaItem);
         }
@@ -471,38 +479,41 @@ const updateMemory = async ({ user, memoryId, title, description, color, backgro
         console.error("Failed to upload file during update:", f.originalname, err);
       }
     }
-    if (uploadedMediaList.length > 0) {
-      payload.mediaList = uploadedMediaList;
-      payload.mediaKey = uploadedMediaList[0].mediaKey;
-      payload.thumbnailKey = uploadedMediaList[0].thumbnailKey;
-      payload.mediaOriginalName = uploadedMediaList[0].mediaOriginalName;
-      payload.mediaMimeType = uploadedMediaList[0].mediaMimeType;
+  } else if (mediaKey) {
+    uploadedMediaList.push({
+      mediaKey,
+      thumbnailKey: null,
+      mediaOriginalName: mediaOriginalName || "file",
+      mediaMimeType: mediaMimeType || "",
+    });
+  } else if (mediaList) {
+    const list = typeof mediaList === "string" ? JSON.parse(mediaList) : mediaList;
+    if (Array.isArray(list)) {
+      uploadedMediaList.push(...list);
     }
+  }
+
+  if (uploadedMediaList.length > 0) {
+    payload.mediaList = uploadedMediaList;
+    payload.mediaKey = uploadedMediaList[0].mediaKey;
+    payload.thumbnailKey = uploadedMediaList[0].thumbnailKey;
+    payload.mediaOriginalName = uploadedMediaList[0].mediaOriginalName;
+    payload.mediaMimeType = uploadedMediaList[0].mediaMimeType;
   }
 
   const updatedMemory = await memoryRepository.updateByIdAndOwnerFirebaseUid(
     memoryId,
-    user.uid,
+    user.id,
     payload
   );
 
-  const serializedMemory = await serializeMemory(updatedMemory, user);
-
-  if (updatedMemory.albumId) {
-    await albumRepository.updateMemory({
-      albumId: updatedMemory.albumId,
-      ownerFirebaseUid: user.uid,
-      memory: buildAlbumMemorySnapshot(serializedMemory),
-    });
-  }
-
-  return serializedMemory;
+  return serializeMemory(updatedMemory, user);
 };
 
 const deleteMemory = async ({ user, memoryId }) => {
   const memory = await memoryRepository.findByIdAndOwnerFirebaseUid(
     memoryId,
-    user.uid
+    user.id
   );
 
   if (!memory) {
@@ -511,13 +522,12 @@ const deleteMemory = async ({ user, memoryId }) => {
     throw error;
   }
 
-  await memoryRepository.deleteByIdAndOwnerFirebaseUid(memoryId, user.uid);
+  await memoryRepository.deleteByIdAndOwnerFirebaseUid(memoryId, user.id);
 
   if (memory.albumId) {
-    await albumRepository.removeMemory({
-      albumId: memory.albumId,
-      ownerFirebaseUid: user.uid,
-      memoryId,
+    await prisma.album.update({
+      where: { id: memory.albumId },
+      data: { entries: { decrement: 1 } }
     });
   }
 
@@ -525,27 +535,43 @@ const deleteMemory = async ({ user, memoryId }) => {
 };
 
 const getFeedMemories = async ({ user }) => {
-  const User = require("../user/user.model");
-  const Memory = require("./memory.model");
+  const userDoc = await prisma.user.findUnique({ where: { id: user.id } });
+  
+  // Get family connections
+  const connections = await prisma.familyConnection.findMany({
+    where: {
+      OR: [
+        { user1Id: user.id },
+        { user2Id: user.id }
+      ]
+    }
+  });
+  const familyUids = connections.map(c => c.user1Id === user.id ? c.user2Id : c.user1Id);
 
-  const currentUserDoc = await User.findOne({ firebaseUid: user.uid });
-  const familyUids = currentUserDoc ? currentUserDoc.familyMembers || [] : [];
+  // Fetch feed memories dynamically
+  const memories = await prisma.memory.findMany({
+    where: {
+      OR: [
+        { privacy: "Public", status: "published" },
+        {
+          privacy: { in: ["Family Circle", "Family"] },
+          status: "published",
+          ownerId: { in: [...familyUids, user.id] }
+        },
+        { ownerId: user.id }
+      ]
+    },
+    orderBy: { occurredAt: "desc" },
+    take: 300
+  });
 
-  const query = {
-    $or: [
-      { privacy: "Public", status: "published" },
-      {
-        privacy: { $in: ["Family Circle", "Family"] },
-        status: "published",
-        ownerFirebaseUid: { $in: [...familyUids, user.uid] }
-      },
-      { ownerFirebaseUid: user.uid }
-    ]
-  };
+  let recentInteractions = [];
+  try {
+    recentInteractions = typeof userDoc?.recentInteractions === "string" 
+      ? JSON.parse(userDoc.recentInteractions) 
+      : userDoc?.recentInteractions || [];
+  } catch (_) {}
 
-  const memories = await Memory.find(query).sort({ occurredAt: -1 }).limit(300);
-
-  const recentInteractions = currentUserDoc ? currentUserDoc.recentInteractions || [] : [];
   const interestMap = {};
   const limitTime = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
@@ -587,10 +613,9 @@ const getFeedMemories = async ({ user }) => {
 };
 
 const interactWithMemory = async ({ user, memoryId, type }) => {
-  const User = require("../user/user.model");
-  const Memory = require("./memory.model");
-
-  const memory = await Memory.findById(memoryId);
+  const memory = await prisma.memory.findUnique({
+    where: { id: memoryId }
+  });
   if (!memory) {
     const error = new Error("Memory not found for interaction tracking.");
     error.statusCode = 404;
@@ -610,33 +635,36 @@ const interactWithMemory = async ({ user, memoryId, type }) => {
     weight
   }));
 
-  await User.findOneAndUpdate(
-    { firebaseUid: user.uid },
-    {
-      $push: {
-        recentInteractions: {
-          $each: newInteractions,
-          $slice: -100
-        }
-      }
-    }
-  );
+  const userDoc = await prisma.user.findUnique({ where: { id: user.id } });
+  let interactions = [];
+  try {
+    interactions = typeof userDoc.recentInteractions === "string" 
+      ? JSON.parse(userDoc.recentInteractions) 
+      : userDoc.recentInteractions || [];
+  } catch (_) {}
+  if (!Array.isArray(interactions)) interactions = [];
+
+  interactions = [...interactions, ...newInteractions].slice(-100);
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { recentInteractions: interactions }
+  });
 
   return { success: true };
 };
 
 const getMemoryDetails = async ({ currentUser, memoryId }) => {
-  const User = require("../user/user.model");
-  const Memory = require("./memory.model");
-
-  const memory = await Memory.findById(memoryId);
+  const memory = await prisma.memory.findUnique({
+    where: { id: memoryId }
+  });
   if (!memory) {
     const error = new Error("Memory could not be found.");
     error.statusCode = 404;
     throw error;
   }
 
-  if (memory.ownerFirebaseUid === currentUser.uid) {
+  if (memory.ownerId === currentUser.id) {
     return serializeMemory(memory, currentUser);
   }
 
@@ -655,9 +683,13 @@ const getMemoryDetails = async ({ currentUser, memoryId }) => {
       error.statusCode = 403;
       throw error;
     }
-    const ownerDoc = await User.findOne({ firebaseUid: memory.ownerFirebaseUid });
-    const isFamilyMember = ownerDoc?.familyMembers?.includes(currentUser.uid);
-    if (!isFamilyMember) {
+    
+    const [u1, u2] = [currentUser.id, memory.ownerId].sort();
+    const familyConnection = await prisma.familyConnection.findUnique({
+      where: { user1Id_user2Id: { user1Id: u1, user2Id: u2 } }
+    });
+    
+    if (!familyConnection) {
       const error = new Error("Access denied: family only.");
       error.statusCode = 403;
       throw error;
@@ -671,19 +703,22 @@ const getMemoryDetails = async ({ currentUser, memoryId }) => {
 };
 
 const reactToMemory = async ({ user, memoryId, type }) => {
-  const PostReaction = require("./postReaction.model");
-  const Memory = require("./memory.model");
-
-  const memory = await Memory.findById(memoryId);
+  const memory = await prisma.memory.findUnique({
+    where: { id: memoryId }
+  });
   if (!memory) {
     const error = new Error("Memory not found");
     error.statusCode = 404;
     throw error;
   }
 
-  const existingReaction = await PostReaction.findOne({
-    memoryId,
-    userFirebaseUid: user.uid
+  const existingReaction = await prisma.postReaction.findUnique({
+    where: {
+      memoryId_userId: {
+        memoryId,
+        userId: user.id
+      }
+    }
   });
 
   let userReaction = type;
@@ -692,40 +727,44 @@ const reactToMemory = async ({ user, memoryId, type }) => {
     const oldType = existingReaction.type;
     if (oldType === type || !type) {
       // Toggle off
-      await PostReaction.deleteOne({ _id: existingReaction._id });
-      await Memory.findByIdAndUpdate(memoryId, { $inc: { likes: -1 } });
+      await prisma.postReaction.delete({
+        where: { id: existingReaction.id }
+      });
+      await prisma.memory.update({
+        where: { id: memoryId },
+        data: { likes: { decrement: 1 } }
+      });
       userReaction = null;
     } else {
       // Change reaction
-      existingReaction.type = type;
-      await existingReaction.save();
+      await prisma.postReaction.update({
+        where: { id: existingReaction.id },
+        data: { type }
+      });
     }
   } else if (type) {
     // Add reaction
-    await PostReaction.create({
-      memoryId,
-      userFirebaseUid: user.uid,
-      type
+    await prisma.postReaction.create({
+      data: {
+        memoryId,
+        userId: user.id,
+        type
+      }
     });
-    await Memory.findByIdAndUpdate(memoryId, { $inc: { likes: 1 } });
+    await prisma.memory.update({
+      where: { id: memoryId },
+      data: { likes: { increment: 1 } }
+    });
   }
 
-  // Also log user interaction for personalization matching
   if (type) {
     await interactWithMemory({ user, memoryId, type: "like" });
   }
 
-  const updatedMemory = await Memory.findById(memoryId);
+  const updatedMemory = await prisma.memory.findUnique({
+    where: { id: memoryId }
+  });
   const serializedMemory = await serializeMemory(updatedMemory, user);
-  
-  if (updatedMemory.albumId) {
-    const albumRepository = require("../albums/album.repository");
-    await albumRepository.updateMemory({
-      albumId: updatedMemory.albumId,
-      ownerFirebaseUid: updatedMemory.ownerFirebaseUid,
-      memory: buildAlbumMemorySnapshot(serializedMemory),
-    });
-  }
 
   return {
     likes: updatedMemory.likes || 0,
@@ -735,28 +774,10 @@ const reactToMemory = async ({ user, memoryId, type }) => {
 };
 
 const shareMemory = async ({ memoryId }) => {
-  const Memory = require("./memory.model");
-
-  const memory = await Memory.findById(memoryId);
-  if (!memory) {
-    const error = new Error("Memory not found");
-    error.statusCode = 404;
-    throw error;
-  }
-
-  await Memory.findByIdAndUpdate(memoryId, { $inc: { shares: 1 } });
-
-  const updatedMemory = await Memory.findById(memoryId);
-  const serializedMemory = await serializeMemory(updatedMemory);
-
-  if (updatedMemory.albumId) {
-    const albumRepository = require("../albums/album.repository");
-    await albumRepository.updateMemory({
-      albumId: updatedMemory.albumId,
-      ownerFirebaseUid: updatedMemory.ownerFirebaseUid,
-      memory: buildAlbumMemorySnapshot(serializedMemory),
-    });
-  }
+  const updatedMemory = await prisma.memory.update({
+    where: { id: memoryId },
+    data: { shares: { increment: 1 } }
+  });
 
   return {
     shares: updatedMemory.shares || 0
@@ -764,20 +785,24 @@ const shareMemory = async ({ memoryId }) => {
 };
 
 const getDiscoveryMemories = async ({ user, filter = "for-you", theme }) => {
-  const User = require("../user/user.model");
-  const Memory = require("./memory.model");
-
-  const currentUserDoc = await User.findOne({ firebaseUid: user.uid });
-  const familyUids = currentUserDoc ? currentUserDoc.familyMembers || [] : [];
+  // Get family connections
+  const connections = await prisma.familyConnection.findMany({
+    where: {
+      OR: [
+        { user1Id: user.id },
+        { user2Id: user.id }
+      ]
+    }
+  });
+  const familyUids = connections.map(c => c.user1Id === user.id ? c.user2Id : c.user1Id);
 
   let query = {};
 
   if (filter === "family") {
-    // Show ONLY family posts from connected family members and the user themselves
     query = {
-      privacy: { $in: ["Family Circle", "Family"] },
+      privacy: { in: ["Family Circle", "Family"] },
       status: "published",
-      ownerFirebaseUid: { $in: [...familyUids, user.uid] }
+      ownerId: { in: [...familyUids, user.id] }
     };
   } else if (filter === "public") {
     query = {
@@ -791,27 +816,30 @@ const getDiscoveryMemories = async ({ user, filter = "for-you", theme }) => {
     };
     if (theme && theme !== "All") {
       const cleanTheme = theme.trim().toLowerCase();
-      const themeParts = cleanTheme.split(" ");
-      query.$or = themeParts.map(part => ({
-        tags: { $in: [new RegExp(part, "i")] }
-      }));
+      const themeParts = cleanTheme.split(" ").map(p => p.trim()).filter(Boolean);
+      query.tags = { hasSome: themeParts };
     }
   } else {
     // for-you: show all public memories + connected family memories of connected family members and user themselves
     query = {
-      $or: [
+      OR: [
         { privacy: "Public", status: "published" },
         {
-          privacy: { $in: ["Family Circle", "Family"] },
+          privacy: { in: ["Family Circle", "Family"] },
           status: "published",
-          ownerFirebaseUid: { $in: [...familyUids, user.uid] }
+          ownerId: { in: [...familyUids, user.id] }
         }
       ]
     };
   }
 
   // Execute query and serialize
-  const memories = await Memory.find(query).sort({ occurredAt: -1 }).limit(100);
+  const memories = await prisma.memory.findMany({
+    where: query,
+    orderBy: { occurredAt: "desc" },
+    take: 100
+  });
+
   return Promise.all(memories.map((m) => serializeMemory(m, user)));
 };
 

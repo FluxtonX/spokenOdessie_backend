@@ -1,0 +1,225 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id                    String            @id @default(uuid())
+  email                 String            @unique
+  password              String?           // Hashed (null for Google-only accounts)
+  googleId              String?           @unique
+  displayName           String?
+  photoURL              String?           // Public URL
+  photoKey              String?           // S3 Key for profile picture
+  coverURL              String?           // Public URL
+  coverKey              String?           // S3 Key for cover photo
+  bio                   String            @default("")
+  profession            String            @default("")
+  location              String            @default("Earth")
+  birthDate             String            @default("")
+  lifeMotto             String            @default("")
+  expertise             String[]          @default([])
+  defaultEntryPrivacy   String            @default("Private - Only by you")
+  profileVisibility     String            @default("Follower only")
+  onboardingCompleted   Boolean           @default(false)
+  profileCompleted      Boolean           @default(false)
+  role                  Role              @default(USER)
+  isActive              Boolean           @default(true)
+  lastLogin             DateTime          @default(now())
+  lastActive            DateTime          @default(now())
+  
+  // Forgot Password fields
+  passwordResetToken   String?           @unique
+  passwordResetExpires DateTime?
+  
+  // Custom metadata (personality Q&As, goals, projects, values, etc.)
+  goals                 String            @default("")
+  projects              String            @default("")
+  achievements          String            @default("")
+  interests             String            @default("")
+  lessons               String            @default("")
+  values                String            @default("")
+  causes                String            @default("")
+  personalityQs         Json              @default("[{\"q\":\"What is your happiest memory from childhood?\",\"a\":\"\"},{\"q\":\"How would you like to be remembered?\",\"a\":\"\"}]")
+  recentInteractions    Json              @default("[]")
+
+  // Relations
+  memories              Memory[]
+  albums                Album[]
+  comments              Comment[]
+  postReactions         PostReaction[]
+  commentReactions      CommentReaction[]
+  
+  // Self-referencing Follows
+  followers             Follow[]          @relation("following")
+  following             Follow[]          @relation("follower")
+
+  // Bidirectional Family Connections (represented via a junction table)
+  familyConnectsAsFirst FamilyConnection[] @relation("user1")
+  familyConnectsAsSec   FamilyConnection[] @relation("user2")
+
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  @@index([email])
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+model Follow {
+  id          String   @id @default(uuid())
+  followerId  String
+  followingId String
+  
+  follower    User     @relation("follower", fields: [followerId], references: [id], onDelete: Cascade)
+  following   User     @relation("following", fields: [followingId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime @default(now())
+
+  @@unique([followerId, followingId])
+  @@index([followerId])
+  @@index([followingId])
+}
+
+model FamilyConnection {
+  id        String   @id @default(uuid())
+  user1Id   String
+  user2Id   String
+
+  user1     User     @relation("user1", fields: [user1Id], references: [id], onDelete: Cascade)
+  user2     User     @relation("user2", fields: [user2Id], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([user1Id, user2Id])
+  @@index([user1Id])
+  @@index([user2Id])
+}
+
+model Album {
+  id               String   @id @default(uuid())
+  title            String
+  subtitle         String   @default("")
+  coverImageKey    String?
+  privacy          String   @default("Private")
+  entries          Int      @default(0)
+  
+  ownerId          String
+  owner            User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  memories         Memory[]
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([ownerId])
+  @@index([privacy])
+}
+
+model Memory {
+  id                String         @id @default(uuid())
+  title             String
+  description       String         @default("")
+  tags              String[]       @default([])
+  mood              String         @default("")
+  privacy           String         @default("Private")
+  type              String         @default("Text")
+  status            String         @default("draft")
+  occurredAt        DateTime       @default(now())
+  color             String         @default("")
+  backgroundId      String         @default("none")
+  fontId            String         @default("default")
+
+  // Legacy single file keys (for backwards compatibility)
+  mediaKey          String?
+  thumbnailKey      String?
+  mediaOriginalName String         @default("")
+  mediaMimeType     String         @default("")
+
+  // Multi-media list support (stored as structured JSON)
+  mediaList         Json           @default("[]")
+
+  // Counters
+  likes             Int            @default(0)
+  commentsCount     Int            @default(0)
+  shares            Int            @default(0)
+
+  ownerId           String
+  owner             User           @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  albumId           String?
+  album             Album?         @relation(fields: [albumId], references: [id], onDelete: SetNull)
+
+  comments          Comment[]
+  reactions         PostReaction[]
+
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  @@index([ownerId])
+  @@index([albumId])
+  @@index([status])
+  @@index([privacy])
+}
+
+model PostReaction {
+  id        String   @id @default(uuid())
+  memoryId  String
+  userId    String
+  type      String   // "heart", "like", "wow", "haha", "angry"
+
+  memory    Memory   @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([memoryId, userId])
+  @@index([memoryId])
+  @@index([userId])
+}
+
+model Comment {
+  id              String            @id @default(uuid())
+  text            String
+  reactionsCount  Json              @default("{\"like\":0,\"love\":0,\"haha\":0,\"wow\":0,\"sad\":0}")
+  
+  memoryId        String
+  memory          Memory            @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  
+  ownerId         String
+  owner           User              @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  parentCommentId String?
+  parentComment   Comment?          @relation("CommentReplies", fields: [parentCommentId], references: [id], onDelete: Cascade)
+  replies         Comment[]         @relation("CommentReplies")
+
+  reactions       CommentReaction[]
+
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@index([memoryId])
+  @@index([ownerId])
+  @@index([parentCommentId])
+}
+
+model CommentReaction {
+  id        String   @id @default(uuid())
+  commentId String
+  userId    String
+  type      String   // "like", "love", "haha", "wow", "sad"
+
+  comment   Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([commentId, userId])
+  @@index([commentId])
+  @@index([userId])
+}

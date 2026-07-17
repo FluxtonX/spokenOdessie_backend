@@ -4,3 +4,5 @@ node_modules/
 .local-mongo-data/
 .local-mongo-log/
 *.log
+
+/src/generated/prisma

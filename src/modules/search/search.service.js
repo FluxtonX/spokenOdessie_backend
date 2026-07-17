@@ -1,15 +1,21 @@
-const User = require("../user/user.model");
-const Memory = require("../memories/memory.model");
-const Album = require("../albums/album.model");
+const prisma = require("../../config/prisma");
 const memoryService = require("../memories/memory.service");
 const albumService = require("../albums/album.service");
+const { getSignedFileUrl } = require("../../services/s3.service");
 
 const searchArchive = async ({ currentUser, q, type }) => {
-  const currentUserDoc = await User.findOne({ firebaseUid: currentUser.uid });
-  const familyUids = currentUserDoc ? currentUserDoc.familyMembers || [] : [];
+  // Get family connections
+  const connections = await prisma.familyConnection.findMany({
+    where: {
+      OR: [
+        { user1Id: currentUser.id },
+        { user2Id: currentUser.id }
+      ]
+    }
+  });
+  const familyUids = connections.map(c => c.user1Id === currentUser.id ? c.user2Id : c.user1Id);
   
   const cleanQuery = q ? q.trim() : "";
-  const regex = cleanQuery ? new RegExp(cleanQuery, "i") : null;
 
   const results = {
     memories: [],
@@ -19,36 +25,34 @@ const searchArchive = async ({ currentUser, q, type }) => {
 
   // 1. Search Memories
   if (type === "all" || type === "memories") {
-    const privacyCondition = {
-      $or: [
-        { privacy: "Public", status: "published" },
-        {
-          privacy: { $in: ["Family Circle", "Family"] },
-          status: "published",
-          ownerFirebaseUid: { $in: [...familyUids, currentUser.uid] }
-        },
-        { ownerFirebaseUid: currentUser.uid }
-      ]
-    };
-
-    let query = privacyCondition;
-    if (regex) {
-      query = {
-        $and: [
-          privacyCondition,
+    const memories = await prisma.memory.findMany({
+      where: {
+        AND: [
           {
-            $or: [
-              { title: regex },
-              { description: regex },
-              { tags: { $in: [regex] } },
-              { mood: regex }
+            OR: [
+              { privacy: "Public", status: "published" },
+              {
+                privacy: { in: ["Family Circle", "Family"] },
+                status: "published",
+                ownerId: { in: [...familyUids, currentUser.id] }
+              },
+              { ownerId: currentUser.id }
             ]
-          }
+          },
+          cleanQuery ? {
+            OR: [
+              { title: { contains: cleanQuery, mode: "insensitive" } },
+              { description: { contains: cleanQuery, mode: "insensitive" } },
+              { mood: { contains: cleanQuery, mode: "insensitive" } },
+              { tags: { hasSome: [cleanQuery] } }
+            ]
+          } : {}
         ]
-      };
-    }
+      },
+      orderBy: { occurredAt: "desc" },
+      take: 100
+    });
 
-    const memories = await Memory.find(query).sort({ occurredAt: -1 }).limit(100);
     results.memories = await Promise.all(
       memories.map(m => memoryService.serializeMemory(m, currentUser))
     );
@@ -56,34 +60,31 @@ const searchArchive = async ({ currentUser, q, type }) => {
 
   // 2. Search Albums
   if (type === "all" || type === "albums") {
-    // ensure public albums are visible to all, and family albums only to connected family members
-    const privacyCondition = {
-      $or: [
-        { privacy: "Public" },
-        {
-          privacy: "Family",
-          ownerFirebaseUid: { $in: [...familyUids, currentUser.uid] }
-        },
-        { ownerFirebaseUid: currentUser.uid }
-      ]
-    };
-
-    let query = privacyCondition;
-    if (regex) {
-      query = {
-        $and: [
-          privacyCondition,
+    const albums = await prisma.album.findMany({
+      where: {
+        AND: [
           {
-            $or: [
-              { title: regex },
-              { subtitle: regex }
+            OR: [
+              { privacy: "Public" },
+              {
+                privacy: "Family",
+                ownerId: { in: [...familyUids, currentUser.id] }
+              },
+              { ownerId: currentUser.id }
             ]
-          }
+          },
+          cleanQuery ? {
+            OR: [
+              { title: { contains: cleanQuery, mode: "insensitive" } },
+              { subtitle: { contains: cleanQuery, mode: "insensitive" } }
+            ]
+          } : {}
         ]
-      };
-    }
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 50
+    });
 
-    const albums = await Album.find(query).sort({ updatedAt: -1 }).limit(50);
     results.albums = await Promise.all(
       albums.map(a => albumService.serializeAlbum(a, currentUser))
     );
@@ -91,26 +92,24 @@ const searchArchive = async ({ currentUser, q, type }) => {
 
   // 3. Search People (Users)
   if (type === "all" || type === "people") {
-    const searchConditions = [
-      { firebaseUid: { $ne: currentUser.uid } } // Exclude self
-    ];
-
-    if (regex) {
-      searchConditions.push({
-        $or: [
-          { displayName: regex },
-          { email: regex },
-          { profession: regex },
-          { bio: regex },
-          { location: regex }
+    const users = await prisma.user.findMany({
+      where: {
+        AND: [
+          { id: { not: currentUser.id } }, // Exclude self
+          cleanQuery ? {
+            OR: [
+              { displayName: { contains: cleanQuery, mode: "insensitive" } },
+              { email: { contains: cleanQuery, mode: "insensitive" } },
+              { profession: { contains: cleanQuery, mode: "insensitive" } },
+              { bio: { contains: cleanQuery, mode: "insensitive" } },
+              { location: { contains: cleanQuery, mode: "insensitive" } }
+            ]
+          } : {}
         ]
-      });
-    }
+      },
+      take: 50
+    });
 
-    const query = { $and: searchConditions };
-    const users = await User.find(query).limit(50);
-
-    const { getSignedFileUrl } = require("../../services/s3.service");
     results.people = await Promise.all(
       users.map(async (uDoc) => {
         let avatar = uDoc.photoURL || "";
@@ -122,7 +121,7 @@ const searchArchive = async ({ currentUser, q, type }) => {
           }
         }
         return {
-          id: uDoc.firebaseUid,
+          id: uDoc.id,
           name: uDoc.displayName || uDoc.email?.split("@")[0] || "Alexander Mitchell",
           role: uDoc.profession || "Family Contributor",
           location: uDoc.location || "Earth",
