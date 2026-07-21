@@ -3,7 +3,7 @@ name: Deploy to AWS EC2
 on:
   push:
     branches:
-      - br/mudassir
+      - main
 
 jobs:
   deploy:
@@ -104,8 +104,8 @@ jobs:
             echo "✅ Found app at: $APP_DIR"
             cd "$APP_DIR"
             git fetch origin
-            git checkout br/mudassir
-            git pull origin br/mudassir
+            git checkout main
+            git pull origin main
             npm install --production
             pm2 restart all || pm2 start src/server.js --name spoken-odyssey
             pm2 status
