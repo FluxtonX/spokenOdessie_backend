@@ -40,10 +40,11 @@ const getFamily = async (req, res) => {
 
 const connectFamily = async (req, res) => {
   try {
-    const result = await userService.connectFamilyMember({
+    const result = await userService.sendFamilyInvitation({
       currentUser: req.user,
       email: req.body.email,
       firebaseUid: req.body.firebaseUid,
+      relationship: req.body.relationship,
     });
 
     res.status(200).json({
@@ -54,7 +55,66 @@ const connectFamily = async (req, res) => {
     console.error("Connect Family Error:", error.message);
     res.status(error.statusCode || 500).json({
       success: false,
-      message: error.message || "Failed to establish connection",
+      message: error.message || "Failed to send invitation",
+    });
+  }
+};
+
+const getInvitations = async (req, res) => {
+  try {
+    const result = await userService.getPendingInvitations({
+      currentUser: req.user,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Get Invitations Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to fetch invitations",
+    });
+  }
+};
+
+const acceptInvitation = async (req, res) => {
+  try {
+    const result = await userService.acceptFamilyInvitation({
+      currentUser: req.user,
+      invitationId: req.params.id,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Accept Invitation Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to accept invitation",
+    });
+  }
+};
+
+const declineInvitation = async (req, res) => {
+  try {
+    const result = await userService.declineFamilyInvitation({
+      currentUser: req.user,
+      invitationId: req.params.id,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Decline Invitation Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to decline invitation",
     });
   }
 };
@@ -180,6 +240,9 @@ module.exports = {
   getSuggested,
   getFamily,
   connectFamily,
+  getInvitations,
+  acceptInvitation,
+  declineInvitation,
   disconnectFamily,
   follow,
   unfollow,

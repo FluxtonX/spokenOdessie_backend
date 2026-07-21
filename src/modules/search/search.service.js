@@ -126,7 +126,8 @@ const searchArchive = async ({ currentUser, q, type }) => {
           role: uDoc.profession || "Family Contributor",
           location: uDoc.location || "Earth",
           bio: uDoc.bio || "",
-          avatar: avatar
+          avatar: avatar,
+          email: uDoc.email
         };
       })
     );

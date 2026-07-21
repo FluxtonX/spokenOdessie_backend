@@ -93,47 +93,195 @@ const getFamilyMembers = async ({ currentUser }) => {
   return Promise.all(familyUsers.map(u => serializeUser(u)));
 };
 
-const connectFamilyMember = async ({ currentUser, email, firebaseUid }) => {
-  const query = {};
-  if (firebaseUid) query.id = firebaseUid;
-  else if (email) query.email = email.trim().toLowerCase();
-  else {
+const sendFamilyInvitation = async ({ currentUser, email, firebaseUid, relationship }) => {
+  const cleanEmail = email ? email.trim().toLowerCase() : "";
+  let targetUser = null;
+
+  if (firebaseUid) {
+    targetUser = await prisma.user.findUnique({ where: { id: firebaseUid } });
+  } else if (cleanEmail) {
+    targetUser = await prisma.user.findUnique({ where: { email: cleanEmail } });
+  }
+
+  if (!targetUser && !cleanEmail) {
     const error = new Error("Email or User ID is required");
     error.statusCode = 400;
     throw error;
   }
 
-  const targetUser = await prisma.user.findFirst({ where: query });
-  if (!targetUser) {
-    const error = new Error("User not found");
-    error.statusCode = 404;
-    throw error;
-  }
-
-  if (targetUser.id === currentUser.id) {
-    const error = new Error("You cannot connect with yourself");
+  if (targetUser && targetUser.id === currentUser.id) {
+    const error = new Error("You cannot invite yourself");
     error.statusCode = 400;
     throw error;
   }
 
-  // Connect bidirectionally
-  const [u1, u2] = [currentUser.id, targetUser.id].sort();
+  // Check if already connected in FamilyConnection
+  if (targetUser) {
+    const [u1, u2] = [currentUser.id, targetUser.id].sort();
+    const existingConn = await prisma.familyConnection.findUnique({
+      where: {
+        user1Id_user2Id: { user1Id: u1, user2Id: u2 }
+      }
+    });
+    if (existingConn) {
+      return {
+        message: "Already connected in your Family Circle!",
+        connected: true,
+        user: await serializeUser(targetUser)
+      };
+    }
+  }
+
+  // Check if invitation already exists
+  const existingInvite = await prisma.familyInvitation.findFirst({
+    where: {
+      senderId: currentUser.id,
+      OR: [
+        { email: cleanEmail || (targetUser ? targetUser.email : "") },
+        targetUser ? { receiverId: targetUser.id } : {}
+      ],
+      status: "PENDING"
+    }
+  });
+
+  if (existingInvite) {
+    const updated = await prisma.familyInvitation.update({
+      where: { id: existingInvite.id },
+      data: { relationship: relationship || existingInvite.relationship }
+    });
+    return {
+      message: "Invitation already sent! Updated relationship preferences.",
+      invitation: updated
+    };
+  }
+
+  // Create new invitation record
+  const newInvitation = await prisma.familyInvitation.create({
+    data: {
+      senderId: currentUser.id,
+      receiverId: targetUser ? targetUser.id : null,
+      email: cleanEmail || (targetUser ? targetUser.email : ""),
+      relationship: relationship || "Family Member",
+      status: "PENDING"
+    }
+  });
+
+  return {
+    message: `Invitation successfully sent to ${targetUser?.displayName || cleanEmail}!`,
+    invitation: newInvitation,
+    receiver: targetUser ? await serializeUser(targetUser) : null
+  };
+};
+
+const getPendingInvitations = async ({ currentUser }) => {
+  const invitations = await prisma.familyInvitation.findMany({
+    where: {
+      AND: [
+        {
+          OR: [
+            { receiverId: currentUser.id },
+            { email: currentUser.email.toLowerCase() }
+          ]
+        },
+        { status: "PENDING" }
+      ]
+    },
+    include: {
+      sender: true
+    },
+    orderBy: { createdAt: "desc" }
+  });
+
+  const serializedInvites = await Promise.all(
+    invitations.map(async (inv) => {
+      const senderProfile = await serializeUser(inv.sender);
+      return {
+        id: inv.id,
+        relationship: inv.relationship,
+        status: inv.status,
+        createdAt: inv.createdAt,
+        sender: senderProfile
+      };
+    })
+  );
+
+  return serializedInvites;
+};
+
+const acceptFamilyInvitation = async ({ currentUser, invitationId }) => {
+  const invitation = await prisma.familyInvitation.findUnique({
+    where: { id: invitationId },
+    include: { sender: true }
+  });
+
+  if (!invitation) {
+    const error = new Error("Invitation not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  // Verify authorization
+  const isReceiver = invitation.receiverId === currentUser.id || invitation.email.toLowerCase() === currentUser.email.toLowerCase();
+  if (!isReceiver) {
+    const error = new Error("Not authorized to accept this invitation");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  // Mark invitation as accepted
+  await prisma.familyInvitation.update({
+    where: { id: invitationId },
+    data: {
+      status: "ACCEPTED",
+      receiverId: currentUser.id
+    }
+  });
+
+  // Create bidirectional Family Connection
+  const [u1, u2] = [invitation.senderId, currentUser.id].sort();
   await prisma.familyConnection.upsert({
     where: {
-      user1Id_user2Id: {
-        user1Id: u1,
-        user2Id: u2
-      }
+      user1Id_user2Id: { user1Id: u1, user2Id: u2 }
     },
-    create: {
-      user1Id: u1,
-      user2Id: u2
-    },
+    create: { user1Id: u1, user2Id: u2 },
     update: {}
   });
 
-  return serializeUser(targetUser);
+  return {
+    message: "Invitation accepted! You are now connected in your Family Circle.",
+    connectedUser: await serializeUser(invitation.sender)
+  };
 };
+
+const declineFamilyInvitation = async ({ currentUser, invitationId }) => {
+  const invitation = await prisma.familyInvitation.findUnique({
+    where: { id: invitationId }
+  });
+
+  if (!invitation) {
+    const error = new Error("Invitation not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const isReceiver = invitation.receiverId === currentUser.id || invitation.email.toLowerCase() === currentUser.email.toLowerCase();
+  if (!isReceiver) {
+    const error = new Error("Not authorized to decline this invitation");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  await prisma.familyInvitation.update({
+    where: { id: invitationId },
+    data: { status: "DECLINED" }
+  });
+
+  return {
+    message: "Invitation declined."
+  };
+};
+
+const connectFamilyMember = sendFamilyInvitation;
 
 const disconnectFamilyMember = async ({ currentUser, targetFirebaseUid }) => {
   const targetUser = await prisma.user.findUnique({
@@ -231,6 +379,10 @@ const updateUserActiveStatus = async ({ currentUser }) => {
 module.exports = {
   getSuggestedPeople,
   getFamilyMembers,
+  sendFamilyInvitation,
+  getPendingInvitations,
+  acceptFamilyInvitation,
+  declineFamilyInvitation,
   connectFamilyMember,
   disconnectFamilyMember,
   followUser,

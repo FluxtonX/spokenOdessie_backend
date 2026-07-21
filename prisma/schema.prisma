@@ -61,6 +61,10 @@ model User {
   familyConnectsAsFirst FamilyConnection[] @relation("user1")
   familyConnectsAsSec   FamilyConnection[] @relation("user2")
 
+  // Family Invitations
+  sentInvitations       FamilyInvitation[] @relation("InvitationSender")
+  receivedInvitations   FamilyInvitation[] @relation("InvitationReceiver")
+
   createdAt             DateTime          @default(now())
   updatedAt             DateTime          @updatedAt
 
@@ -100,6 +104,26 @@ model FamilyConnection {
   @@unique([user1Id, user2Id])
   @@index([user1Id])
   @@index([user2Id])
+}
+
+model FamilyInvitation {
+  id           String   @id @default(uuid())
+  senderId     String
+  receiverId   String?
+  email        String
+  relationship String   @default("Family Member")
+  status       String   @default("PENDING")
+
+  sender       User     @relation("InvitationSender", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver     User?    @relation("InvitationReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([senderId])
+  @@index([receiverId])
+  @@index([email])
+  @@index([status])
 }
 
 model Album {
