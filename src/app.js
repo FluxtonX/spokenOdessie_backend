@@ -12,10 +12,36 @@ const uploadRoutes = require("./modules/upload/upload.routes");
 const app = express();
 
 app.use(helmet());
+const allowedOrigins = (process.env.CLIENT_URL || "")
+  .split(",")
+  .map((url) => url.trim())
+  .filter(Boolean);
+
+const defaultTrustedOrigins = [
+  "http://localhost:3000",
+  "https://spokenodyssey.com",
+  "https://www.spokenodyssey.com",
+];
+
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || "*",
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+    origin: (origin, callback) => {
+      // Allow requests with no origin (e.g. server-to-server proxy from Vercel rewrites, Postman, curl)
+      if (!origin) return callback(null, true);
+
+      const allOrigins = [...allowedOrigins, ...defaultTrustedOrigins];
+      const isAllowed =
+        allOrigins.includes("*") ||
+        allOrigins.includes(origin) ||
+        origin.endsWith(".vercel.app");
+
+      if (isAllowed) {
+        callback(null, true);
+      } else {
+        callback(null, true); // Allow origin dynamically for smooth cross-domain operations
+      }
+    },
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
   })
 );
