@@ -80,21 +80,30 @@ const getCommentsForMemory = async ({ currentUser, memoryId }) => {
   }));
 
   const rootComments = [];
-  const repliesMap = {};
+  const commentMap = {};
+
+  formattedComments.forEach(c => {
+    c.replies = [];
+    commentMap[c.id] = c;
+  });
 
   formattedComments.forEach(c => {
     if (c.parentCommentId) {
-      if (!repliesMap[c.parentCommentId]) {
-        repliesMap[c.parentCommentId] = [];
+      // Find top-level root comment if parent is a reply or sub-reply
+      let curr = c.parentCommentId;
+      let root = null;
+      while (curr && commentMap[curr]) {
+        root = commentMap[curr];
+        curr = commentMap[curr].parentCommentId;
       }
-      repliesMap[c.parentCommentId].push(c);
+      if (root) {
+        root.replies.push(c);
+      } else {
+        rootComments.push(c);
+      }
     } else {
       rootComments.push(c);
     }
-  });
-
-  rootComments.forEach(rc => {
-    rc.replies = repliesMap[rc.id] || [];
   });
 
   return rootComments;
@@ -110,12 +119,22 @@ const createComment = async ({ user, memoryId, text, parentCommentId }) => {
     throw error;
   }
 
+  let validParentId = null;
+  if (parentCommentId) {
+    const parentComment = await prisma.comment.findUnique({
+      where: { id: parentCommentId }
+    });
+    if (parentComment) {
+      validParentId = parentCommentId;
+    }
+  }
+
   const comment = await prisma.comment.create({
     data: {
       text,
       memoryId,
       ownerId: user.id,
-      parentCommentId: parentCommentId || null
+      parentCommentId: validParentId
     }
   });
 
