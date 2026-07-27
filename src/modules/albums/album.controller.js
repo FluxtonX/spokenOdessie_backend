@@ -86,9 +86,30 @@ const getAlbumDetails = async (req, res) => {
   }
 };
 
+const deleteAlbum = async (req, res) => {
+  try {
+    const result = await albumService.deleteAlbum({
+      user: req.user,
+      albumId: req.params.id,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Delete Album Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to delete album",
+    });
+  }
+};
+
 module.exports = {
   getAlbums,
   createAlbum,
   updateAlbum,
   getAlbumDetails,
+  deleteAlbum,
 };

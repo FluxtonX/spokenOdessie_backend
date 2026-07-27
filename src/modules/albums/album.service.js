@@ -288,10 +288,28 @@ const getAlbumDetails = async ({ currentUser, albumId }) => {
   throw error;
 };
 
+const deleteAlbum = async ({ user, albumId }) => {
+  const album = await repository.findByIdAndOwnerFirebaseUid(albumId, user.id);
+
+  if (!album) {
+    const error = new Error("Album could not be found.");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  // Delete the album
+  await prisma.album.delete({
+    where: { id: albumId }
+  });
+
+  return { success: true, message: "Album deleted successfully" };
+};
+
 module.exports = {
   serializeAlbum,
   getAlbumsByUser,
   createAlbum,
   updateAlbum,
   getAlbumDetails,
+  deleteAlbum,
 };
