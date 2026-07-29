@@ -107,6 +107,7 @@ jobs:
             git checkout main
             git pull origin main
             npm install --production
+            npx prisma generate
             pm2 restart all || pm2 start src/server.js --name spoken-odyssey
             pm2 status
             echo "🚀 Deployment complete!"
