@@ -35,6 +35,11 @@ model User {
   passwordResetToken   String?           @unique
   passwordResetExpires DateTime?
   
+  // Phone number for SMS invitations
+  phoneNumber           String?           @unique
+  countryCode           String?           @default("+1")
+  phoneVerified         Boolean           @default(false)
+  
   // Custom metadata (personality Q&As, goals, projects, values, etc.)
   goals                 String            @default("")
   projects              String            @default("")
@@ -65,15 +70,30 @@ model User {
   sentInvitations       FamilyInvitation[] @relation("InvitationSender")
   receivedInvitations   FamilyInvitation[] @relation("InvitationReceiver")
 
+  // Family Circle Memberships
+  familyMemberships     FamilyMember[]
+
+  // Notifications
+  notifications         Notification[]
+
+  // Legacy Access Settings
+  legacySettings        LegacySettings?
+
   createdAt             DateTime          @default(now())
   updatedAt             DateTime          @updatedAt
 
   @@index([email])
+  @@index([phoneNumber])
 }
 
 enum Role {
   USER
   ADMIN
+}
+
+enum FamilyRole {
+  ADMIN
+  MEMBER
 }
 
 model Follow {
@@ -106,24 +126,68 @@ model FamilyConnection {
   @@index([user2Id])
 }
 
+model FamilyCircle {
+  id          String   @id @default(uuid())
+  name        String   @default("My Family")
+  description String   @default("")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  members     FamilyMember[]
+  invitations FamilyInvitation[]
+}
+
+model FamilyMember {
+  id              String       @id @default(uuid())
+  familyCircleId  String
+  userId          String
+  role            FamilyRole   @default(MEMBER)
+  relationship    String       @default("Family Member")
+  invitedBy       String?
+  approvedBy      String?
+
+  familyCircle    FamilyCircle @relation(fields: [familyCircleId], references: [id], onDelete: Cascade)
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  joinedAt        DateTime     @default(now())
+  approvedAt      DateTime?
+
+  @@unique([familyCircleId, userId])
+  @@index([familyCircleId])
+  @@index([userId])
+  @@index([role])
+}
+
 model FamilyInvitation {
-  id           String   @id @default(uuid())
-  senderId     String
-  receiverId   String?
-  email        String
-  relationship String   @default("Family Member")
-  status       String   @default("PENDING")
+  id              String   @id @default(uuid())
+  familyCircleId  String
+  senderId        String
+  receiverId      String?
+  email           String?
+  phoneNumber     String?
+  countryCode     String?   @default("+1")
+  invitationToken String   @unique
+  relationship    String   @default("Family Member")
+  status          String   @default("PENDING") // PENDING, ACCEPTED, APPROVED, DECLINED, EXPIRED
+  method          String   @default("EMAIL") // EMAIL, SMS, LINK, QR
 
-  sender       User     @relation("InvitationSender", fields: [senderId], references: [id], onDelete: Cascade)
-  receiver     User?    @relation("InvitationReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+  sender          User     @relation("InvitationSender", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver        User?    @relation("InvitationReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+  familyCircle    FamilyCircle @relation(fields: [familyCircleId], references: [id], onDelete: Cascade)
 
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  expiresAt       DateTime?
+  acceptedAt      DateTime?
+  approvedAt      DateTime?
 
   @@index([senderId])
   @@index([receiverId])
   @@index([email])
+  @@index([phoneNumber])
   @@index([status])
+  @@index([invitationToken])
+  @@index([familyCircleId])
 }
 
 model Album {
@@ -245,5 +309,47 @@ model CommentReaction {
 
   @@unique([commentId, userId])
   @@index([commentId])
+  @@index([userId])
+}
+
+model Notification {
+  id          String   @id @default(uuid())
+  userId      String
+  type        String   // "FAMILY_INVITE_ACCEPTED", "FAMILY_INVITE_APPROVED", "FAMILY_INVITE_DECLINED", "MEMORY_LIKE", "MEMORY_COMMENT", etc.
+  title       String
+  message     String
+  metadata    Json?    // Additional data (e.g., invitationId, familyCircleId, etc.)
+  isRead      Boolean  @default(false)
+  actionUrl   String?  // URL to navigate to when clicked
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([isRead])
+  @@index([type])
+  @@index([createdAt])
+}
+
+model LegacySettings {
+  id                  String   @id @default(uuid())
+  userId              String   @unique
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  administratorId     String?
+  administratorName   String   @default("Sarah Murphy")
+
+  releaseCondition    String   @default("After verified passing")
+  familyCircleAccess  String   @default("Full archive")
+  publicProfile       String   @default("Remain public")
+
+  isReleased          Boolean  @default(false)
+  releasedAt          DateTime?
+  releasedBy          String?
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
   @@index([userId])
 }

@@ -8,6 +8,9 @@ const memoryRoutes = require("./modules/memories/memory.routes");
 const userRoutes = require("./modules/user/user.routes");
 const searchRoutes = require("./modules/search/search.routes");
 const uploadRoutes = require("./modules/upload/upload.routes");
+const familyCircleRoutes = require("./modules/familyCircle/familyCircle.routes");
+const notificationRoutes = require("./modules/notifications/notification.routes");
+const legacyAccessRoutes = require("./modules/legacyAccess/legacyAccess.routes");
 
 const app = express();
 
@@ -61,6 +64,9 @@ app.use("/api/memories", memoryRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/search", searchRoutes);
 app.use("/api/upload", uploadRoutes);
+app.use("/api/family-circle", familyCircleRoutes);
+app.use("/api/notifications", notificationRoutes);
+app.use("/api/legacy-access", legacyAccessRoutes);
 
 app.get("/health", (req, res) => {
   res.status(200).json({

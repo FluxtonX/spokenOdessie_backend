@@ -30,6 +30,7 @@ router.use("/:memoryId/comments", commentRoutes);
 
 router.get("/feed", protect, controller.getFeed);
 router.get("/discovery", protect, controller.getDiscoveryMemories);
+router.get("/family-shared", protect, controller.getFamilySharedMemories);
 router.get("/", protect, controller.getMemories);
 router.get("/:id", protect, controller.getMemoryDetails);
 router.post("/", protect, upload.array("media", 10), controller.createMemory);

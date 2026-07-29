@@ -222,6 +222,26 @@ const getDiscoveryMemories = async (req, res) => {
   }
 };
 
+const getFamilySharedMemories = async (req, res) => {
+  try {
+    const familyCircleService = require("../familyCircle/familyCircle.service");
+    const memories = await familyCircleService.getFamilySharedMemories({
+      currentUser: req.user,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: memories,
+    });
+  } catch (error) {
+    console.error("Get Family Shared Memories Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to fetch family shared memories",
+    });
+  }
+};
+
 module.exports = {
   getMemories,
   createMemory,
@@ -233,4 +253,5 @@ module.exports = {
   reactToMemory,
   shareMemory,
   getDiscoveryMemories,
+  getFamilySharedMemories,
 };

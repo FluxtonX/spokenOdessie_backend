@@ -12,4 +12,11 @@ const pool = new Pool({ connectionString });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
+// Test connection
+prisma.$connect()
+  .then(() => console.log("Database connected successfully"))
+  .catch(err => {
+    console.error("Database connection failed:", err);
+  });
+
 module.exports = prisma;

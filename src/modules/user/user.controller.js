@@ -45,6 +45,7 @@ const connectFamily = async (req, res) => {
       email: req.body.email,
       firebaseUid: req.body.firebaseUid,
       relationship: req.body.relationship,
+      method: req.body.method || "EMAIL",
     });
 
     res.status(200).json({
@@ -236,6 +237,107 @@ const heartbeat = async (req, res) => {
   }
 };
 
+const sendSMSInvitation = async (req, res) => {
+  try {
+    const result = await userService.sendSMSInvitation({
+      currentUser: req.user,
+      phoneNumber: req.body.phoneNumber,
+      countryCode: req.body.countryCode,
+      relationship: req.body.relationship,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Send SMS Invitation Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to send SMS invitation",
+    });
+  }
+};
+
+const createLinkInvitation = async (req, res) => {
+  try {
+    const result = await userService.createLinkInvitation({
+      currentUser: req.user,
+      relationship: req.body.relationship,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Create Link Invitation Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to create link invitation",
+    });
+  }
+};
+
+const createQRInvitation = async (req, res) => {
+  try {
+    const result = await userService.createQRInvitation({
+      currentUser: req.user,
+      relationship: req.body.relationship,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Create QR Invitation Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to create QR invitation",
+    });
+  }
+};
+
+const validateInvitationToken = async (req, res) => {
+  try {
+    const result = await userService.validateInvitationToken({
+      token: req.query.token,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Validate Invitation Token Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to validate invitation token",
+    });
+  }
+};
+
+const acceptInvitationViaToken = async (req, res) => {
+  try {
+    const result = await userService.acceptInvitationViaToken({
+      currentUser: req.user,
+      token: req.body.token,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Accept Invitation Via Token Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to accept invitation via token",
+    });
+  }
+};
+
 module.exports = {
   getSuggested,
   getFamily,
@@ -249,4 +351,9 @@ module.exports = {
   getFollowers,
   getFollowing,
   heartbeat,
+  sendSMSInvitation,
+  createLinkInvitation,
+  createQRInvitation,
+  validateInvitationToken,
+  acceptInvitationViaToken,
 };

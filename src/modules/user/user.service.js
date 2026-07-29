@@ -1,47 +1,11 @@
 const prisma = require("../../config/prisma");
 const { getSignedFileUrl } = require("../../services/s3.service");
-
-const serializeUser = async (userDoc) => {
-  if (!userDoc) return null;
-
-  let photoURL = userDoc.photoURL || "";
-  if (userDoc.photoKey) {
-    try {
-      photoURL = await getSignedFileUrl(userDoc.photoKey);
-    } catch (err) {
-      console.warn("Failed to get signed URL for user profile during user serialization:", err.message);
-    }
-  }
-
-  let coverURL = userDoc.coverURL || "";
-  if (userDoc.coverKey) {
-    try {
-      coverURL = await getSignedFileUrl(userDoc.coverKey);
-    } catch (err) {
-      console.warn("Failed to get signed URL for user cover during user serialization:", err.message);
-    }
-  } else if (!coverURL) {
-    coverURL = "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1200&q=80";
-  }
-
-  const threeMinutesAgo = new Date(Date.now() - 3 * 60 * 1000);
-  
-  return {
-    ...userDoc,
-    id: userDoc.id,
-    name: userDoc.displayName || userDoc.email?.split("@")[0] || "Alexander Mitchell",
-    role: userDoc.profession || "Family Contributor",
-    avatar: photoURL,
-    photoURL,
-    coverURL,
-    bio: userDoc.bio || "",
-    email: userDoc.email,
-    location: userDoc.location || "Earth",
-    isActive: userDoc.lastActive ? new Date(userDoc.lastActive) > threeMinutesAgo : false,
-    firebaseUid: userDoc.id, // compatibility
-    uid: userDoc.id,         // compatibility
-  };
-};
+const { getOrCreateFamilyCircle } = require("../familyCircle/familyCircle.service");
+const { sendInvitationSMS, formatPhoneNumber } = require("../sms/sms.service");
+const { generateInvitationQR } = require("../qr/qr.service");
+const { createNotification } = require("../notifications/notification.service");
+const { serializeUser } = require("../../utils/serializer");
+const crypto = require("crypto");
 
 const getSuggestedPeople = async ({ currentUser }) => {
   // Get connected family members
@@ -93,7 +57,7 @@ const getFamilyMembers = async ({ currentUser }) => {
   return Promise.all(familyUsers.map(u => serializeUser(u)));
 };
 
-const sendFamilyInvitation = async ({ currentUser, email, firebaseUid, relationship }) => {
+const sendFamilyInvitation = async ({ currentUser, email, firebaseUid, relationship, method = "EMAIL" }) => {
   const cleanEmail = email ? email.trim().toLowerCase() : "";
   let targetUser = null;
 
@@ -115,61 +79,69 @@ const sendFamilyInvitation = async ({ currentUser, email, firebaseUid, relations
     throw error;
   }
 
-  // Check if already connected in FamilyConnection
+  // Get or create family circle for sender
+  const familyCircle = await getOrCreateFamilyCircle({ currentUser });
+
+  // Check if already a member of the family circle
   if (targetUser) {
-    const [u1, u2] = [currentUser.id, targetUser.id].sort();
-    const existingConn = await prisma.familyConnection.findUnique({
+    const existingMember = await prisma.familyMember.findFirst({
       where: {
-        user1Id_user2Id: { user1Id: u1, user2Id: u2 }
+        familyCircleId: familyCircle.id,
+        userId: targetUser.id
       }
     });
-    if (existingConn) {
+    if (existingMember) {
       return {
-        message: "Already connected in your Family Circle!",
+        message: "Already a member of your Family Circle!",
         connected: true,
         user: await serializeUser(targetUser)
       };
     }
   }
 
-  // Check if invitation already exists
+  // Check if invitation already exists and is not expired/declined
   const existingInvite = await prisma.familyInvitation.findFirst({
     where: {
+      familyCircleId: familyCircle.id,
       senderId: currentUser.id,
       OR: [
         { email: cleanEmail || (targetUser ? targetUser.email : "") },
         targetUser ? { receiverId: targetUser.id } : {}
       ],
-      status: "PENDING"
+      status: { in: ["PENDING", "ACCEPTED"] }
     }
   });
 
   if (existingInvite) {
-    const updated = await prisma.familyInvitation.update({
-      where: { id: existingInvite.id },
-      data: { relationship: relationship || existingInvite.relationship }
-    });
     return {
-      message: "Invitation already sent! Updated relationship preferences.",
-      invitation: updated
+      message: "Invitation already sent! Waiting for recipient to accept.",
+      invitation: existingInvite
     };
   }
+
+  // Generate unique invitation token
+  const invitationToken = crypto.randomUUID();
 
   // Create new invitation record
   const newInvitation = await prisma.familyInvitation.create({
     data: {
+      familyCircleId: familyCircle.id,
       senderId: currentUser.id,
       receiverId: targetUser ? targetUser.id : null,
       email: cleanEmail || (targetUser ? targetUser.email : ""),
       relationship: relationship || "Family Member",
-      status: "PENDING"
+      status: "PENDING",
+      method,
+      invitationToken,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days
     }
   });
 
   return {
     message: `Invitation successfully sent to ${targetUser?.displayName || cleanEmail}!`,
     invitation: newInvitation,
-    receiver: targetUser ? await serializeUser(targetUser) : null
+    receiver: targetUser ? await serializeUser(targetUser) : null,
+    invitationToken
   };
 };
 
@@ -211,7 +183,7 @@ const getPendingInvitations = async ({ currentUser }) => {
 const acceptFamilyInvitation = async ({ currentUser, invitationId }) => {
   const invitation = await prisma.familyInvitation.findUnique({
     where: { id: invitationId },
-    include: { sender: true }
+    include: { sender: true, familyCircle: true }
   });
 
   if (!invitation) {
@@ -220,36 +192,50 @@ const acceptFamilyInvitation = async ({ currentUser, invitationId }) => {
     throw error;
   }
 
+  // Check if expired
+  if (invitation.expiresAt && new Date() > invitation.expiresAt) {
+    await prisma.familyInvitation.update({
+      where: { id: invitationId },
+      data: { status: "EXPIRED" }
+    });
+    const error = new Error("Invitation has expired");
+    error.statusCode = 400;
+    throw error;
+  }
+
   // Verify authorization
-  const isReceiver = invitation.receiverId === currentUser.id || invitation.email.toLowerCase() === currentUser.email.toLowerCase();
+  const isReceiver = invitation.receiverId === currentUser.id || 
+                    (invitation.email && invitation.email.toLowerCase() === currentUser.email.toLowerCase());
   if (!isReceiver) {
     const error = new Error("Not authorized to accept this invitation");
     error.statusCode = 403;
     throw error;
   }
 
-  // Mark invitation as accepted
+  if (invitation.status !== "PENDING") {
+    const error = new Error(`Invitation is already ${invitation.status.toLowerCase()}`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  // Mark invitation as accepted (waiting for admin approval)
   await prisma.familyInvitation.update({
     where: { id: invitationId },
     data: {
       status: "ACCEPTED",
-      receiverId: currentUser.id
+      receiverId: currentUser.id,
+      acceptedAt: new Date()
     }
   });
 
-  // Create bidirectional Family Connection
-  const [u1, u2] = [invitation.senderId, currentUser.id].sort();
-  await prisma.familyConnection.upsert({
-    where: {
-      user1Id_user2Id: { user1Id: u1, user2Id: u2 }
-    },
-    create: { user1Id: u1, user2Id: u2 },
-    update: {}
-  });
-
   return {
-    message: "Invitation accepted! You are now connected in your Family Circle.",
-    connectedUser: await serializeUser(invitation.sender)
+    message: "Invitation accepted! Waiting for admin approval to join the Family Circle.",
+    invitation: {
+      id: invitation.id,
+      familyCircleName: invitation.familyCircle.name,
+      senderName: invitation.sender.displayName || invitation.sender.email?.split("@")[0],
+      relationship: invitation.relationship
+    }
   };
 };
 
@@ -282,6 +268,373 @@ const declineFamilyInvitation = async ({ currentUser, invitationId }) => {
 };
 
 const connectFamilyMember = sendFamilyInvitation;
+
+/**
+ * Send SMS invitation
+ */
+const sendSMSInvitation = async ({ currentUser, phoneNumber, countryCode, relationship }) => {
+  const cleanPhone = phoneNumber?.replace(/\D/g, "") || "";
+  const cleanCountryCode = countryCode || "+1";
+
+  if (!cleanPhone) {
+    const error = new Error("Phone number is required");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  // Check if user already exists with this phone
+  const targetUser = await prisma.user.findFirst({
+    where: { phoneNumber: cleanPhone }
+  });
+
+  if (targetUser && targetUser.id === currentUser.id) {
+    const error = new Error("You cannot invite yourself");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  // Get or create family circle for sender
+  const familyCircle = await getOrCreateFamilyCircle({ currentUser });
+
+  // Check if already a member
+  if (targetUser) {
+    const existingMember = await prisma.familyMember.findFirst({
+      where: {
+        familyCircleId: familyCircle.id,
+        userId: targetUser.id
+      }
+    });
+    if (existingMember) {
+      return {
+        message: "Already a member of your Family Circle!",
+        connected: true,
+        user: await serializeUser(targetUser)
+      };
+    }
+  }
+
+  // Check if invitation already exists
+  const existingInvite = await prisma.familyInvitation.findFirst({
+    where: {
+      familyCircleId: familyCircle.id,
+      senderId: currentUser.id,
+      phoneNumber: cleanPhone,
+      status: { in: ["PENDING", "ACCEPTED"] }
+    }
+  });
+
+  if (existingInvite) {
+    return {
+      message: "Invitation already sent to this phone number!",
+      invitation: existingInvite
+    };
+  }
+
+  // Generate unique invitation token
+  const invitationToken = crypto.randomUUID();
+
+  // Create invitation record
+  const newInvitation = await prisma.familyInvitation.create({
+    data: {
+      familyCircleId: familyCircle.id,
+      senderId: currentUser.id,
+      receiverId: targetUser ? targetUser.id : null,
+      phoneNumber: cleanPhone,
+      countryCode: cleanCountryCode,
+      relationship: relationship || "Family Member",
+      status: "PENDING",
+      method: "SMS",
+      invitationToken,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+    }
+  });
+
+  // Send SMS via AWS SNS
+  try {
+    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+    const invitationLink = `${frontendUrl}/family/join?token=${invitationToken}`;
+    const inviterName = currentUser.displayName || currentUser.email?.split("@")[0] || "Someone";
+    
+    await sendInvitationSMS({
+      phoneNumber: formatPhoneNumber(cleanCountryCode, cleanPhone),
+      inviterName: inviterName,
+      invitationLink: invitationLink,
+      relationship: relationship || "Family Member"
+    });
+  } catch (smsError) {
+    console.error("Failed to send SMS:", smsError);
+    // Don't fail the invitation creation if SMS fails
+    // The invitation is still valid and can be resent
+  }
+
+  return {
+    message: `SMS invitation sent to ${cleanCountryCode}${cleanPhone}!`,
+    invitation: newInvitation,
+    receiver: targetUser ? await serializeUser(targetUser) : null,
+    invitationToken
+  };
+};
+
+/**
+ * Create shareable link invitation
+ */
+const createLinkInvitation = async ({ currentUser, relationship }) => {
+  // Get or create family circle for sender
+  const familyCircle = await getOrCreateFamilyCircle({ currentUser });
+
+  // Generate cryptographically secure random token
+  const invitationToken = crypto.randomBytes(32).toString('hex');
+
+  // Create invitation record with 7-day expiration
+  const newInvitation = await prisma.familyInvitation.create({
+    data: {
+      familyCircleId: familyCircle.id,
+      senderId: currentUser.id,
+      relationship: relationship || "Family Member",
+      status: "PENDING",
+      method: "LINK",
+      invitationToken,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+    }
+  });
+
+  // Use production domain from env, fallback to localhost
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+  const joinLink = `${frontendUrl}/invite/${invitationToken}`;
+
+  return {
+    message: "Shareable link created!",
+    invitation: newInvitation,
+    joinLink,
+    invitationToken
+  };
+};
+
+/**
+ * Create QR code invitation
+ */
+const createQRInvitation = async ({ currentUser, relationship }) => {
+  // Get or create family circle for sender
+  const familyCircle = await getOrCreateFamilyCircle({ currentUser });
+
+  // Generate cryptographically secure random token
+  const invitationToken = crypto.randomBytes(32).toString('hex');
+
+  // Create invitation record with 7-day expiration
+  const newInvitation = await prisma.familyInvitation.create({
+    data: {
+      familyCircleId: familyCircle.id,
+      senderId: currentUser.id,
+      relationship: relationship || "Family Member",
+      status: "PENDING",
+      method: "QR",
+      invitationToken,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+    }
+  });
+
+  // Use production domain from env, fallback to localhost
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+  const joinLink = `${frontendUrl}/invite/${invitationToken}`;
+
+  // Generate QR code
+  const qrCodeData = await generateInvitationQR({
+    invitationToken,
+    frontendUrl
+  });
+
+  return {
+    message: "QR code invitation created!",
+    invitation: newInvitation,
+    joinLink,
+    invitationToken,
+    qrCode: qrCodeData.qrCode
+  };
+};
+
+/**
+ * Validate invitation token (for join via link/QR)
+ */
+const validateInvitationToken = async ({ token }) => {
+  const invitation = await prisma.familyInvitation.findUnique({
+    where: { invitationToken: token },
+    include: { sender: true, familyCircle: true }
+  });
+
+  if (!invitation) {
+    const error = new Error("Invalid invitation token");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  // Check if expired
+  if (invitation.expiresAt && new Date() > invitation.expiresAt) {
+    await prisma.familyInvitation.update({
+      where: { id: invitation.id },
+      data: { status: "EXPIRED" }
+    });
+    const error = new Error("Invitation has expired");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (invitation.status !== "PENDING") {
+    const error = new Error(`Invitation is already ${invitation.status.toLowerCase()}`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const sender = await serializeUser(invitation.sender);
+
+  return {
+    invitation: {
+      id: invitation.id,
+      familyCircleId: invitation.familyCircleId,
+      familyCircleName: invitation.familyCircle.name,
+      senderName: sender.name,
+      senderAvatar: sender.avatar,
+      relationship: invitation.relationship,
+      method: invitation.method
+    }
+  };
+};
+
+/**
+ * Accept invitation via token (for link/QR joins)
+ */
+const acceptInvitationViaToken = async ({ currentUser, token }) => {
+  const invitation = await prisma.familyInvitation.findUnique({
+    where: { invitationToken: token },
+    include: { sender: true, familyCircle: true }
+  });
+
+  if (!invitation) {
+    const error = new Error("Invalid invitation token");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  // Check if expired
+  if (invitation.expiresAt && new Date() > invitation.expiresAt) {
+    await prisma.familyInvitation.update({
+      where: { id: invitation.id },
+      data: { status: "EXPIRED" }
+    });
+    const error = new Error("Invitation has expired");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (invitation.status !== "PENDING") {
+    const error = new Error(`Invitation is already ${invitation.status.toLowerCase()}`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  // Check if already a member
+  const existingMember = await prisma.familyMember.findFirst({
+    where: {
+      familyCircleId: invitation.familyCircleId,
+      userId: currentUser.id
+    }
+  });
+
+  if (existingMember) {
+    return {
+      message: "You are already a member of this Family Circle!",
+      alreadyMember: true
+    };
+  }
+
+  // Check for duplicate pending request
+  const existingPending = await prisma.familyInvitation.findFirst({
+    where: {
+      familyCircleId: invitation.familyCircleId,
+      receiverId: currentUser.id,
+      status: "ACCEPTED"
+    }
+  });
+
+  if (existingPending) {
+    return {
+      message: "You already have a pending request for this Family Circle!",
+      alreadyPending: true
+    };
+  }
+
+  // Mark invitation as accepted (waiting for admin approval)
+  await prisma.familyInvitation.update({
+    where: { id: invitation.id },
+    data: {
+      status: "ACCEPTED",
+      receiverId: currentUser.id,
+      acceptedAt: new Date()
+    }
+  });
+
+  // Create notification for admin about pending approval
+  const receiverName = currentUser.displayName || currentUser.name || currentUser.email?.split("@")[0] || "Unknown";
+  const senderName = invitation.sender.displayName || invitation.sender.email?.split("@")[0] || "Unknown";
+  const familyCircleName = invitation.familyCircle.name;
+  
+  // Find the admin of the family circle
+  const familyCircleWithAdmins = await prisma.familyCircle.findUnique({
+    where: { id: invitation.familyCircleId },
+    include: {
+      members: {
+        where: { role: "ADMIN" },
+        include: { user: true }
+      }
+    }
+  });
+
+  // Send notification to all admins
+  if (familyCircleWithAdmins && familyCircleWithAdmins.members.length > 0) {
+    for (const adminMember of familyCircleWithAdmins.members) {
+      await createNotification({
+        userId: adminMember.user.id,
+        type: "FAMILY_INVITE_ACCEPTED",
+        title: "New Family Circle Join Request",
+        message: `${receiverName} has accepted your invitation to join ${familyCircleName} as ${invitation.relationship}. Please review and approve this request.`,
+        metadata: {
+          invitationId: invitation.id,
+          familyCircleId: invitation.familyCircleId,
+          receiverId: currentUser.id,
+          receiverName,
+          senderId: invitation.senderId,
+          relationship: invitation.relationship
+        },
+        actionUrl: `/family`
+      });
+    }
+  } else {
+    // If no admins found, notify the sender
+    await createNotification({
+      userId: invitation.senderId,
+      type: "FAMILY_INVITE_ACCEPTED",
+      title: "New Family Circle Join Request",
+      message: `${receiverName} has accepted your invitation to join ${familyCircleName} as ${invitation.relationship}. Please review and approve this request.`,
+      metadata: {
+        invitationId: invitation.id,
+        familyCircleId: invitation.familyCircleId,
+        receiverId: currentUser.id,
+        receiverName,
+        relationship: invitation.relationship
+      },
+      actionUrl: `/family`
+    });
+  }
+
+  return {
+    message: "Invitation accepted! Waiting for admin approval to join the Family Circle.",
+    invitation: {
+      id: invitation.id,
+      familyCircleName: invitation.familyCircle.name,
+      senderName: invitation.sender.displayName || invitation.sender.email?.split("@")[0],
+      relationship: invitation.relationship
+    }
+  };
+};
 
 const disconnectFamilyMember = async ({ currentUser, targetFirebaseUid }) => {
   const targetUser = await prisma.user.findUnique({
@@ -369,11 +722,20 @@ const getFollowingList = async ({ user }) => {
 };
 
 const updateUserActiveStatus = async ({ currentUser }) => {
-  const user = await prisma.user.update({
-    where: { id: currentUser.id },
-    data: { lastActive: new Date() }
-  });
-  return user ? serializeUser(user) : null;
+  if (!currentUser || (!currentUser.id && !currentUser.uid)) {
+    return null;
+  }
+  const userId = currentUser.id || currentUser.uid;
+  try {
+    const user = await prisma.user.update({
+      where: { id: userId },
+      data: { lastActive: new Date() }
+    });
+    return user ? serializeUser(user) : null;
+  } catch (err) {
+    console.warn("Update user active status warning:", err.message);
+    return null;
+  }
 };
 
 module.exports = {
@@ -385,6 +747,11 @@ module.exports = {
   declineFamilyInvitation,
   connectFamilyMember,
   disconnectFamilyMember,
+  sendSMSInvitation,
+  createLinkInvitation,
+  createQRInvitation,
+  validateInvitationToken,
+  acceptInvitationViaToken,
   followUser,
   unfollowUser,
   getFollowersList,
