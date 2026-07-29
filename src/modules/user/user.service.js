@@ -351,7 +351,7 @@ const sendSMSInvitation = async ({ currentUser, phoneNumber, countryCode, relati
 
   // Send SMS via AWS SNS
   try {
-    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+    const frontendUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || "https://www.spokenodyssey.com";
     const invitationLink = `${frontendUrl}/family/join?token=${invitationToken}`;
     const inviterName = currentUser.displayName || currentUser.email?.split("@")[0] || "Someone";
     
@@ -398,8 +398,8 @@ const createLinkInvitation = async ({ currentUser, relationship }) => {
     }
   });
 
-  // Use production domain from env, fallback to localhost
-  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+  // Use production domain from env, fallback to spokenodyssey.com
+  const frontendUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'https://www.spokenodyssey.com';
   const joinLink = `${frontendUrl}/invite/${invitationToken}`;
 
   return {
@@ -433,8 +433,8 @@ const createQRInvitation = async ({ currentUser, relationship }) => {
     }
   });
 
-  // Use production domain from env, fallback to localhost
-  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+  // Use production domain from env, fallback to spokenodyssey.com
+  const frontendUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'https://www.spokenodyssey.com';
   const joinLink = `${frontendUrl}/invite/${invitationToken}`;
 
   // Generate QR code
