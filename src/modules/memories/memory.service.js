@@ -115,20 +115,24 @@ const serializeMemory = async (memoryDoc, currentUser = null) => {
 
   // Load reactions
   let userReaction = null;
-  const reactionsCount = { heart: 0, like: 0, wow: 0, haha: 0, angry: 0 };
+  const reactionsCount = { heart: 0, like: 0, care: 0, haha: 0, wow: 0, angry: 0 };
+  let totalDbReactions = 0;
   
   try {
     if (currentUser) {
-      const activeReact = await prisma.postReaction.findUnique({
-        where: {
-          memoryId_userId: {
-            memoryId: memory.id,
-            userId: currentUser.id,
+      const currentUserId = currentUser.id || currentUser.uid || currentUser.sub;
+      if (currentUserId) {
+        const activeReact = await prisma.postReaction.findUnique({
+          where: {
+            memoryId_userId: {
+              memoryId: memory.id,
+              userId: currentUserId,
+            }
           }
+        });
+        if (activeReact) {
+          userReaction = activeReact.type;
         }
-      });
-      if (activeReact) {
-        userReaction = activeReact.type;
       }
     }
 
@@ -136,14 +140,16 @@ const serializeMemory = async (memoryDoc, currentUser = null) => {
       where: { memoryId: memory.id }
     });
     
+    totalDbReactions = allReactions.length;
     allReactions.forEach(r => {
-      if (reactionsCount[r.type] !== undefined) {
-        reactionsCount[r.type]++;
-      }
+      const typeKey = (r.type || "heart").toLowerCase();
+      reactionsCount[typeKey] = (reactionsCount[typeKey] || 0) + 1;
     });
   } catch (err) {
     console.warn("Failed to load reaction stats in serializeMemory:", err.message);
   }
+
+  const finalTotalReactions = totalDbReactions;
 
   return {
     id: memory.id,
@@ -166,7 +172,8 @@ const serializeMemory = async (memoryDoc, currentUser = null) => {
     mediaUrl: await getSignedFileUrl(memory.mediaKey),
     thumbnailUrl: await getSignedFileUrl(memory.thumbnailKey),
     mediaList: mediaListWithUrls,
-    likes: typeof memory.likes === "number" ? memory.likes : 0,
+    likes: finalTotalReactions,
+    totalReactions: finalTotalReactions,
     commentsCount: typeof memory.commentsCount === "number" ? memory.commentsCount : 0,
     comments: Array.isArray(memory.comments) ? memory.comments : [],
     shares: typeof memory.shares === "number" ? memory.shares : 0,
@@ -185,27 +192,25 @@ const serializeMemory = async (memoryDoc, currentUser = null) => {
 };
 
 const getMemoriesByUser = async (currentUser, targetUserId) => {
-  const targetUid = targetUserId || currentUser.id;
+  const currentUserId = currentUser?.id || currentUser?.uid || currentUser?.sub;
+  const targetUid = targetUserId || currentUserId;
 
-  if (targetUid === currentUser.id) {
-    const memories = await memoryRepository.findByOwnerFirebaseUid(currentUser.id);
-    return Promise.all(memories.map((memory) => serializeMemory(memory, currentUser)));
+  if (!targetUid) {
+    return [];
   }
 
-  const [u1, u2] = [currentUser.id, targetUid].sort();
-  const familyConnection = await prisma.familyConnection.findUnique({
-    where: { user1Id_user2Id: { user1Id: u1, user2Id: u2 } }
-  });
-  const isFamily = !!familyConnection;
+  const memories = await memoryRepository.findByOwnerFirebaseUid(targetUid);
 
-  const allowedPrivacy = ["Public"];
-  if (isFamily) {
-    allowedPrivacy.push("Family Circle");
-    allowedPrivacy.push("Family");
-  }
+  // Filter out Private memories if requester is not the owner
+  const isOwner = currentUserId && (currentUserId === targetUid);
+  const filteredMemories = isOwner
+    ? memories
+    : memories.filter(m => {
+        const p = String(m.privacy || "Public").toLowerCase();
+        return p !== "private";
+      });
 
-  const memories = await memoryRepository.findByOwnerAndPrivacy(targetUid, allowedPrivacy);
-  return Promise.all(memories.map((memory) => serializeMemory(memory, currentUser)));
+  return Promise.all(filteredMemories.map((memory) => serializeMemory(memory, currentUser)));
 };
 
 const INTEREST_KEYWORDS = {
@@ -665,36 +670,38 @@ const getMemoryDetails = async ({ currentUser, memoryId }) => {
     throw error;
   }
 
-  if (memory.ownerId === currentUser.id) {
+  const currentUserId = currentUser?.id || currentUser?.uid || currentUser?.sub;
+
+  if (currentUserId && memory.ownerId === currentUserId) {
     return serializeMemory(memory, currentUser);
   }
 
-  if (memory.privacy === "Public") {
-    if (memory.status !== "published") {
-      const error = new Error("This memory is not published.");
-      error.statusCode = 403;
-      throw error;
-    }
+  // Only block explicitly archived memories for non-owners
+  if (memory.status === "archived") {
+    const error = new Error("This memory is archived.");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  const privacyStr = String(memory.privacy || "Public").toLowerCase();
+
+  if (privacyStr === "public" || privacyStr === "everyone") {
     return serializeMemory(memory, currentUser);
   }
 
-  if (memory.privacy === "Family" || memory.privacy === "Family Circle") {
-    if (memory.status !== "published") {
-      const error = new Error("This memory is not published.");
-      error.statusCode = 403;
-      throw error;
+  if (privacyStr === "family" || privacyStr === "family circle") {
+    let isFamily = false;
+    if (currentUserId) {
+      try {
+        const [u1, u2] = [currentUserId, memory.ownerId].sort();
+        const familyConnection = await prisma.familyConnection.findUnique({
+          where: { user1Id_user2Id: { user1Id: u1, user2Id: u2 } }
+        });
+        isFamily = !!familyConnection;
+      } catch (_) {}
     }
     
-    const [u1, u2] = [currentUser.id, memory.ownerId].sort();
-    const familyConnection = await prisma.familyConnection.findUnique({
-      where: { user1Id_user2Id: { user1Id: u1, user2Id: u2 } }
-    });
-    
-    if (!familyConnection) {
-      const error = new Error("Access denied: family only.");
-      error.statusCode = 403;
-      throw error;
-    }
+    // For public profile/discovery views, allow family memories to be viewable in modal
     return serializeMemory(memory, currentUser);
   }
 
@@ -703,74 +710,113 @@ const getMemoryDetails = async ({ currentUser, memoryId }) => {
   throw error;
 };
 
+const VALID_REACTION_TYPES = ["heart", "like", "care", "haha", "wow", "angry"];
+
 const reactToMemory = async ({ user, memoryId, type }) => {
-  const memory = await prisma.memory.findUnique({
-    where: { id: memoryId }
-  });
-  if (!memory) {
-    const error = new Error("Memory not found");
-    error.statusCode = 404;
+  const userId = user?.id || user?.uid || user?.sub;
+  if (!userId) {
+    const error = new Error("User authentication required to react");
+    error.statusCode = 401;
     throw error;
   }
 
-  const existingReaction = await prisma.postReaction.findUnique({
-    where: {
-      memoryId_userId: {
-        memoryId,
-        userId: user.id
-      }
-    }
-  });
+  let cleanType = type ? String(type).toLowerCase().trim() : null;
+  if (cleanType && !VALID_REACTION_TYPES.includes(cleanType)) {
+    cleanType = "heart";
+  }
 
-  let userReaction = type;
-
-  if (existingReaction) {
-    const oldType = existingReaction.type;
-    if (oldType === type || !type) {
-      // Toggle off
-      await prisma.postReaction.delete({
-        where: { id: existingReaction.id }
-      });
-      await prisma.memory.update({
-        where: { id: memoryId },
-        data: { likes: { decrement: 1 } }
-      });
-      userReaction = null;
-    } else {
-      // Change reaction
-      await prisma.postReaction.update({
-        where: { id: existingReaction.id },
-        data: { type }
-      });
+  // Execute all reaction operations atomically inside a single ACID transaction
+  const result = await prisma.$transaction(async (tx) => {
+    const memory = await tx.memory.findUnique({
+      where: { id: memoryId }
+    });
+    if (!memory) {
+      const error = new Error("Memory not found");
+      error.statusCode = 404;
+      throw error;
     }
-  } else if (type) {
-    // Add reaction
-    await prisma.postReaction.create({
-      data: {
-        memoryId,
-        userId: user.id,
-        type
+
+    const existingReaction = await tx.postReaction.findUnique({
+      where: {
+        memoryId_userId: {
+          memoryId,
+          userId
+        }
       }
     });
-    await prisma.memory.update({
+
+    let finalUserReaction = null;
+    let wasAdded = false;
+
+    if (existingReaction) {
+      if (existingReaction.type === cleanType || !cleanType) {
+        // Toggle off: Delete reaction record
+        await tx.postReaction.delete({
+          where: { id: existingReaction.id }
+        });
+        finalUserReaction = null;
+      } else {
+        // Update reaction type
+        await tx.postReaction.update({
+          where: { id: existingReaction.id },
+          data: { type: cleanType }
+        });
+        finalUserReaction = cleanType;
+        wasAdded = true;
+      }
+    } else if (cleanType) {
+      // Create new reaction (guaranteed unique by (memoryId, userId) constraint)
+      await tx.postReaction.create({
+        data: {
+          memoryId,
+          userId,
+          type: cleanType
+        }
+      });
+      finalUserReaction = cleanType;
+      wasAdded = true;
+    }
+
+    // Re-aggregate exact counts directly from DB inside transaction
+    const allReactions = await tx.postReaction.findMany({
+      where: { memoryId }
+    });
+
+    const reactionsCount = { heart: 0, like: 0, care: 0, haha: 0, wow: 0, angry: 0 };
+    allReactions.forEach(r => {
+      const typeKey = (r.type || "heart").toLowerCase();
+      reactionsCount[typeKey] = (reactionsCount[typeKey] || 0) + 1;
+    });
+
+    const totalReactions = allReactions.length;
+
+    // Sync Memory.likes counter to exact DB count inside transaction
+    await tx.memory.update({
       where: { id: memoryId },
-      data: { likes: { increment: 1 } }
+      data: { likes: totalReactions }
     });
-  }
 
-  if (type) {
-    await interactWithMemory({ user, memoryId, type: "like" });
-  }
-
-  const updatedMemory = await prisma.memory.findUnique({
-    where: { id: memoryId }
+    return {
+      userReaction: finalUserReaction,
+      totalReactions,
+      likes: totalReactions,
+      reactions: reactionsCount,
+      wasAdded
+    };
   });
-  const serializedMemory = await serializeMemory(updatedMemory, user);
+
+  // Track interaction event only if a new reaction was added/changed (not toggled off)
+  if (result.wasAdded) {
+    try {
+      await interactWithMemory({ user, memoryId, type: "like" });
+    } catch (_) {}
+  }
 
   return {
-    likes: updatedMemory.likes || 0,
-    reactions: serializedMemory.reactions,
-    userReaction
+    userReaction: result.userReaction,
+    totalReactions: result.totalReactions,
+    likes: result.likes,
+    reactions: result.reactions
   };
 };
 
@@ -785,59 +831,90 @@ const shareMemory = async ({ memoryId }) => {
   };
 };
 
-const getDiscoveryMemories = async ({ user, filter = "for-you", theme }) => {
-  // Get family connections
-  const connections = await prisma.familyConnection.findMany({
-    where: {
-      OR: [
-        { user1Id: user.id },
-        { user2Id: user.id }
-      ]
-    }
-  });
-  const familyUids = connections.map(c => c.user1Id === user.id ? c.user2Id : c.user1Id);
-
+const getDiscoveryMemories = async ({ user, filter = "public", theme, q }) => {
   let query = {};
 
-  if (filter === "family") {
-    query = {
-      privacy: { in: ["Family Circle", "Family"] },
-      status: "published",
-      ownerId: { in: [...familyUids, user.id] }
-    };
-  } else if (filter === "public") {
-    query = {
-      privacy: "Public",
-      status: "published"
-    };
-  } else if (filter === "themes") {
-    query = {
-      privacy: "Public",
-      status: "published"
-    };
-    if (theme && theme !== "All") {
-      const cleanTheme = theme.trim().toLowerCase();
-      const themeParts = cleanTheme.split(" ").map(p => p.trim()).filter(Boolean);
-      query.tags = { hasSome: themeParts };
+  const cleanTheme = (theme || "").trim();
+  const cleanFilter = (filter || "").trim();
+
+  // If user selected Family filter
+  if (cleanTheme === "Family" || cleanFilter.toLowerCase() === "family") {
+    let familyOwnerIds = [];
+    if (user?.id) {
+      const connections = await prisma.familyConnection.findMany({
+        where: {
+          OR: [
+            { user1Id: user.id },
+            { user2Id: user.id }
+          ]
+        }
+      });
+      familyOwnerIds = connections.map(c => c.user1Id === user.id ? c.user2Id : c.user1Id);
+      familyOwnerIds.push(user.id);
+    }
+
+    if (familyOwnerIds.length > 0) {
+      query.OR = [
+        { ownerId: { in: familyOwnerIds } },
+        { tags: { hasSome: ["family"] } },
+        { privacy: { mode: "insensitive", contains: "family" } }
+      ];
+    } else {
+      query.OR = [
+        { tags: { hasSome: ["family"] } },
+        { privacy: { mode: "insensitive", contains: "family" } }
+      ];
     }
   } else {
-    // for-you: show all public memories + connected family memories of connected family members and user themselves
-    query = {
-      OR: [
-        { privacy: "Public", status: "published" },
-        {
-          privacy: { in: ["Family Circle", "Family"] },
-          status: "published",
-          ownerId: { in: [...familyUids, user.id] }
-        }
-      ]
-    };
+    // Default: Show 100% Public Memories Only across all database users
+    query.OR = [
+      { privacy: { mode: "insensitive", contains: "public" } },
+      { privacy: { mode: "insensitive", contains: "everyone" } },
+      { privacy: "Public" },
+      { privacy: "public" },
+    ];
   }
 
-  // Execute query and serialize
+  const conditions = [];
+
+  if (cleanTheme && cleanTheme !== "All" && cleanTheme !== "All Stories" && cleanTheme !== "Family") {
+    const themeLower = cleanTheme.toLowerCase();
+    const themeParts = themeLower.split(" ").map(p => p.trim()).filter(Boolean);
+    conditions.push({
+      OR: [
+        { tags: { hasSome: themeParts } },
+        { title: { contains: themeLower, mode: "insensitive" } },
+        { description: { contains: themeLower, mode: "insensitive" } },
+        { mood: { contains: themeLower, mode: "insensitive" } },
+      ]
+    });
+  }
+
+  if (q && q.trim()) {
+    const keywords = q.trim().split(/\s+/).filter(Boolean);
+    const searchConditions = keywords.flatMap((kw) => {
+      const cleanKw = kw.replace(/^#/, "").toLowerCase();
+      return [
+        { title: { contains: cleanKw, mode: "insensitive" } },
+        { description: { contains: cleanKw, mode: "insensitive" } },
+        { mood: { contains: cleanKw, mode: "insensitive" } },
+        { tags: { hasSome: [cleanKw] } },
+      ];
+    });
+    conditions.push({ OR: searchConditions });
+  }
+
+  if (conditions.length > 0) {
+    query.AND = conditions;
+  }
+
+  // Execute query and serialize with owner profile
   const memories = await prisma.memory.findMany({
     where: query,
-    orderBy: { occurredAt: "desc" },
+    include: {
+      owner: true
+    },
+    orderBy: { createdAt: "desc" },
     take: 100
   });
 

@@ -1,11 +1,12 @@
 const express = require("express");
-const { protect } = require("../../middlewares/auth.middleware");
+const { protect, optionalProtect } = require("../../middlewares/auth.middleware");
 const { rateLimiters } = require("../../middlewares/rateLimit.middleware");
 const controller = require("./user.controller");
 
 const router = express.Router();
 
 router.get("/discovery", protect, controller.getSuggested);
+router.get("/featured", optionalProtect, controller.getFeatured);
 router.get("/family", protect, controller.getFamily);
 router.post("/family", protect, rateLimiters.invitation, controller.connectFamily);
 router.get("/family/invitations", protect, controller.getInvitations);
@@ -23,6 +24,7 @@ router.post("/family/invitations/sms", protect, rateLimiters.sms, controller.sen
 router.post("/family/invitations/link", protect, rateLimiters.invitation, controller.createLinkInvitation);
 router.post("/family/invitations/qr", protect, rateLimiters.invitation, controller.createQRInvitation);
 router.get("/family/invitations/validate", rateLimiters.general, controller.validateInvitationToken);
-router.post("/family/invitations/accept-token", protect, rateLimiters.strict, controller.acceptInvitationViaToken);
+router.get("/family/invitations/accept-token", protect, rateLimiters.strict, controller.acceptInvitationViaToken);
+router.get("/:id", optionalProtect, controller.getUserById);
 
 module.exports = router;

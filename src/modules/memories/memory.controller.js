@@ -163,10 +163,11 @@ const getMemoryDetails = async (req, res) => {
 
 const reactToMemory = async (req, res) => {
   try {
+    const reactionType = req.body.type || req.body.reactionType || req.body.reaction;
     const result = await memoryService.reactToMemory({
       user: req.user,
       memoryId: req.params.id,
-      type: req.body.type,
+      type: reactionType,
     });
 
     res.status(200).json({
@@ -207,6 +208,7 @@ const getDiscoveryMemories = async (req, res) => {
       user: req.user,
       filter: req.query.filter,
       theme: req.query.theme,
+      q: req.query.q,
     });
 
     res.status(200).json({

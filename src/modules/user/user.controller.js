@@ -19,6 +19,27 @@ const getSuggested = async (req, res) => {
   }
 };
 
+const getFeatured = async (req, res) => {
+  try {
+    const users = await userService.getFeaturedPeople({
+      currentUser: req.user,
+      category: req.query.category,
+      query: req.query.q,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: users,
+    });
+  } catch (error) {
+    console.error("Get Featured Users Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to fetch featured people",
+    });
+  }
+};
+
 const getFamily = async (req, res) => {
   try {
     const family = await userService.getFamilyMembers({
@@ -338,8 +359,29 @@ const acceptInvitationViaToken = async (req, res) => {
   }
 };
 
+const getUserById = async (req, res) => {
+  try {
+    const user = await userService.getUserById({
+      currentUser: req.user,
+      userId: req.params.id,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: user,
+    });
+  } catch (error) {
+    console.error("Get User By ID Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to fetch user profile",
+    });
+  }
+};
+
 module.exports = {
   getSuggested,
+  getFeatured,
   getFamily,
   connectFamily,
   getInvitations,
@@ -356,4 +398,5 @@ module.exports = {
   createQRInvitation,
   validateInvitationToken,
   acceptInvitationViaToken,
+  getUserById,
 };
