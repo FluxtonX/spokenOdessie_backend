@@ -456,6 +456,7 @@ const forgotPassword = async (req, res) => {
       return res.status(400).json({ success: false, message: "Email is required" });
     }
 
+    const emailLower = email.toLowerCase().trim();
     let user = await prisma.user.findUnique({ where: { email: emailLower } });
 
     // Universal Email Guarantee: If user does not exist in DB yet, create user record so Brevo email is ALWAYS dispatched
