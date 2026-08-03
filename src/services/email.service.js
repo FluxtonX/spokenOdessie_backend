@@ -15,7 +15,7 @@ const getTransporter = () => {
   const pass = process.env.SMTP_PASS;
 
   if (!user || !pass) {
-    console.warn("⚠️ Warning: Brevo SMTP credentials (SMTP_USER / SMTP_PASS) not configured in environment.");
+    console.warn("⚠️ Brevo SMTP credentials not configured in process.env");
     return null;
   }
 

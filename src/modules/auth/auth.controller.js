@@ -474,14 +474,18 @@ const forgotPassword = async (req, res) => {
     const otpCodeHashed = crypto.createHash("sha256").update(otpCode).digest("hex");
     const resetExpires = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes expiry
 
-    // Save hashed OTP token to database
-    await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        passwordResetToken: otpCodeHashed,
-        passwordResetExpires: resetExpires,
-      },
-    });
+    // Save hashed OTP token to database if possible
+    try {
+      await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          passwordResetToken: otpCodeHashed,
+          passwordResetExpires: resetExpires,
+        },
+      });
+    } catch (dbErr) {
+      console.warn("⚠️ Warning updating user reset token in DB:", dbErr.message);
+    }
 
     // Send email via Brevo email service
     const { sendPasswordResetEmail } = require("../../services/email.service");
