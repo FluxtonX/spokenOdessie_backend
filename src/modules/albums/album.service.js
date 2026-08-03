@@ -95,18 +95,28 @@ const serializeAlbum = async (album, currentUser) => {
 };
 
 const getAlbumsByUser = async (currentUser, targetUserId) => {
-  const targetUid = targetUserId || currentUser.id;
+  const currentUserId = currentUser?.id || currentUser?.uid || currentUser?.sub;
+  const targetUid = targetUserId || currentUserId;
 
-  if (targetUid === currentUser.id) {
-    const albums = await repository.findByOwnerFirebaseUid(currentUser.id);
+  if (!targetUid) {
+    return [];
+  }
+
+  if (currentUserId && targetUid === currentUserId) {
+    const albums = await repository.findByOwnerFirebaseUid(currentUserId);
     return Promise.all(albums.map((album) => serializeAlbum(album, currentUser)));
   }
 
-  const [u1, u2] = [currentUser.id, targetUid].sort();
-  const familyConnection = await prisma.familyConnection.findUnique({
-    where: { user1Id_user2Id: { user1Id: u1, user2Id: u2 } }
-  });
-  const isFamily = !!familyConnection;
+  let isFamily = false;
+  if (currentUserId && targetUid) {
+    try {
+      const [u1, u2] = [currentUserId, targetUid].sort();
+      const familyConnection = await prisma.familyConnection.findUnique({
+        where: { user1Id_user2Id: { user1Id: u1, user2Id: u2 } }
+      });
+      isFamily = !!familyConnection;
+    } catch (_) {}
+  }
 
   // Get all albums of target user and serialize them with privacy filtering
   const albums = await repository.findByOwnerFirebaseUid(targetUid);
@@ -114,12 +124,13 @@ const getAlbumsByUser = async (currentUser, targetUserId) => {
 
   // Filter albums that are visible to the requester
   return serialized.filter((album) => {
+    if (!album) return false;
     const albumPrivacy = album.privacy || "Private";
-    if (albumPrivacy === "Public") return true;
-    if (albumPrivacy === "Family" && isFamily) return true;
+    if (albumPrivacy === "Public" || albumPrivacy === "public" || albumPrivacy === "Everyone") return true;
+    if ((albumPrivacy === "Family" || albumPrivacy === "Family Circle") && isFamily) return true;
     
     // Private/Family album where user isn't family: only show if the album contains at least one memory visible to them
-    if (album.memories.length > 0) return true;
+    if (Array.isArray(album.memories) && album.memories.length > 0) return true;
 
     return false;
   });

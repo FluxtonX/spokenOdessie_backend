@@ -38,6 +38,54 @@ const getSuggestedPeople = async ({ currentUser }) => {
   return Promise.all(suggestedUsers.map(u => serializeUser(u)));
 };
 
+const getFeaturedPeople = async ({ currentUser, category, query }) => {
+  const currentUserId = currentUser?.id;
+  const whereClause = {
+    isActive: true,
+  };
+
+  if (currentUserId) {
+    whereClause.id = { not: currentUserId };
+  }
+
+  if (query && query.trim()) {
+    const keywords = query.trim().split(/\s+/).filter(Boolean);
+    const searchConditions = keywords.flatMap((kw) => [
+      { displayName: { contains: kw, mode: "insensitive" } },
+      { email: { contains: kw, mode: "insensitive" } },
+      { profession: { contains: kw, mode: "insensitive" } },
+      { bio: { contains: kw, mode: "insensitive" } },
+      { location: { contains: kw, mode: "insensitive" } },
+    ]);
+    whereClause.OR = searchConditions;
+  }
+
+  const users = await prisma.user.findMany({
+    where: whereClause,
+    include: {
+      _count: {
+        select: { followers: true }
+      },
+      followers: currentUserId ? {
+        where: { followerId: currentUserId }
+      } : false
+    },
+    take: 50,
+    orderBy: { createdAt: "desc" }
+  });
+
+  return Promise.all(
+    users.map(async (u) => {
+      const serialized = await serializeUser(u);
+      return {
+        ...serialized,
+        followersCount: u._count?.followers || 0,
+        isFollowing: Array.isArray(u.followers) && u.followers.length > 0
+      };
+    })
+  );
+};
+
 const getFamilyMembers = async ({ currentUser }) => {
   const connections = await prisma.familyConnection.findMany({
     where: {
@@ -136,6 +184,26 @@ const sendFamilyInvitation = async ({ currentUser, email, firebaseUid, relations
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days
     }
   });
+
+  // Trigger Brevo Family Invitation Email if recipient has an email address
+  const inviteEmail = cleanEmail || (targetUser ? targetUser.email : "");
+  if (inviteEmail) {
+    try {
+      const { sendFamilyInvitationEmail } = require("../../services/email.service");
+      const clientUrl = process.env.CLIENT_URL ? process.env.CLIENT_URL.split(",")[0].trim() : "http://localhost:3000";
+      const inviteUrl = `${clientUrl}/family/join?token=${invitationToken}`;
+      const senderName = currentUser.displayName || currentUser.email?.split("@")[0] || "A family member";
+
+      await sendFamilyInvitationEmail({
+        toEmail: inviteEmail,
+        senderName,
+        relationship: relationship || "Family Member",
+        inviteUrl,
+      });
+    } catch (emailErr) {
+      console.warn("Could not send family invitation email via Brevo:", emailErr.message);
+    }
+  }
 
   return {
     message: `Invitation successfully sent to ${targetUser?.displayName || cleanEmail}!`,
@@ -738,8 +806,63 @@ const updateUserActiveStatus = async ({ currentUser }) => {
   }
 };
 
+const getUserById = async ({ currentUser, userId }) => {
+  const currentUserId = currentUser?.id;
+  const targetUser = await prisma.user.findFirst({
+    where: {
+      OR: [
+        { id: userId },
+        { googleId: userId },
+        { email: userId ? userId.toLowerCase() : "" }
+      ]
+    },
+    include: {
+      _count: {
+        select: {
+          followers: true,
+          following: true,
+          memories: true,
+          albums: true
+        }
+      },
+      followers: currentUserId ? {
+        where: { followerId: currentUserId }
+      } : false
+    }
+  });
+
+  if (!targetUser) {
+    const error = new Error("User not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const serialized = await serializeUser(targetUser);
+
+  const milestoneCount = await prisma.memory.count({
+    where: {
+      ownerId: targetUser.id,
+      OR: [
+        { type: { mode: "insensitive", contains: "milestone" } },
+        { tags: { hasSome: ["milestone", "Milestone"] } }
+      ]
+    }
+  });
+
+  return {
+    ...serialized,
+    followersCount: targetUser._count?.followers || 0,
+    followingCount: targetUser._count?.following || 0,
+    memoriesCount: targetUser._count?.memories || 0,
+    albumsCount: targetUser._count?.albums || 0,
+    milestonesCount: milestoneCount,
+    isFollowing: Array.isArray(targetUser.followers) && targetUser.followers.length > 0
+  };
+};
+
 module.exports = {
   getSuggestedPeople,
+  getFeaturedPeople,
   getFamilyMembers,
   sendFamilyInvitation,
   getPendingInvitations,
@@ -757,5 +880,6 @@ module.exports = {
   getFollowersList,
   getFollowingList,
   updateUserActiveStatus,
+  getUserById,
   serializeUser
 };

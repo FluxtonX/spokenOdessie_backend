@@ -1,7 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 
-const { protect } = require("../../middlewares/auth.middleware");
+const { protect, optionalProtect } = require("../../middlewares/auth.middleware");
 const controller = require("./memory.controller");
 const commentRoutes = require("../comments/comment.routes");
 
@@ -29,10 +29,10 @@ const upload = multer({
 router.use("/:memoryId/comments", commentRoutes);
 
 router.get("/feed", protect, controller.getFeed);
-router.get("/discovery", protect, controller.getDiscoveryMemories);
+router.get("/discovery", optionalProtect, controller.getDiscoveryMemories);
 router.get("/family-shared", protect, controller.getFamilySharedMemories);
-router.get("/", protect, controller.getMemories);
-router.get("/:id", protect, controller.getMemoryDetails);
+router.get("/", optionalProtect, controller.getMemories);
+router.get("/:id", optionalProtect, controller.getMemoryDetails);
 router.post("/", protect, upload.array("media", 10), controller.createMemory);
 router.post("/:id/interact", protect, controller.interactWithMemory);
 router.post("/:id/react", protect, controller.reactToMemory);

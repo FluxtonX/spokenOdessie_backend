@@ -1,7 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 
-const { protect } = require("../../middlewares/auth.middleware");
+const { protect, optionalProtect } = require("../../middlewares/auth.middleware");
 const controller = require("./album.controller");
 
 const router = express.Router();
@@ -21,7 +21,7 @@ const upload = multer({
   },
 });
 
-router.get("/", protect, controller.getAlbums);
+router.get("/", optionalProtect, controller.getAlbums);
 router.get("/:id", protect, controller.getAlbumDetails);
 router.post("/", protect, upload.single("coverImage"), controller.createAlbum);
 router.patch("/:id", protect, upload.single("coverImage"), controller.updateAlbum);
