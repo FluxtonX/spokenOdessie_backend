@@ -185,6 +185,26 @@ const sendFamilyInvitation = async ({ currentUser, email, firebaseUid, relations
     }
   });
 
+  // Trigger Brevo Family Invitation Email if recipient has an email address
+  const inviteEmail = cleanEmail || (targetUser ? targetUser.email : "");
+  if (inviteEmail) {
+    try {
+      const { sendFamilyInvitationEmail } = require("../../services/email.service");
+      const clientUrl = process.env.CLIENT_URL ? process.env.CLIENT_URL.split(",")[0].trim() : "http://localhost:3000";
+      const inviteUrl = `${clientUrl}/family/join?token=${invitationToken}`;
+      const senderName = currentUser.displayName || currentUser.email?.split("@")[0] || "A family member";
+
+      await sendFamilyInvitationEmail({
+        toEmail: inviteEmail,
+        senderName,
+        relationship: relationship || "Family Member",
+        inviteUrl,
+      });
+    } catch (emailErr) {
+      console.warn("Could not send family invitation email via Brevo:", emailErr.message);
+    }
+  }
+
   return {
     message: `Invitation successfully sent to ${targetUser?.displayName || cleanEmail}!`,
     invitation: newInvitation,

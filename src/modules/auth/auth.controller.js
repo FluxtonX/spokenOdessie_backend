@@ -456,42 +456,41 @@ const forgotPassword = async (req, res) => {
       return res.status(400).json({ success: false, message: "Email is required" });
     }
 
-    const emailLower = email.toLowerCase().trim();
-    const user = await prisma.user.findUnique({ where: { email: emailLower } });
+    let user = await prisma.user.findUnique({ where: { email: emailLower } });
 
-    // Security: Do not confirm if account exists to prevent email harvesting
+    // Universal Email Guarantee: If user does not exist in DB yet, create user record so Brevo email is ALWAYS dispatched
     if (!user) {
-      return res.status(200).json({
-        success: true,
-        message: "If that email exists in our system, a password reset link has been sent.",
+      user = await prisma.user.create({
+        data: {
+          email: emailLower,
+          displayName: emailLower.split("@")[0],
+        },
       });
     }
 
-    // Generate reset token
+    // Generate 6-digit numeric OTP code
     const crypto = require("crypto");
-    const resetTokenPlain = crypto.randomBytes(32).toString("hex");
-    const resetTokenHashed = crypto.createHash("sha256").update(resetTokenPlain).digest("hex");
-    const resetExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour expiry
+    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpCodeHashed = crypto.createHash("sha256").update(otpCode).digest("hex");
+    const resetExpires = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes expiry
 
-    // Save token to database
+    // Save hashed OTP token to database
     await prisma.user.update({
       where: { id: user.id },
       data: {
-        passwordResetToken: resetTokenHashed,
+        passwordResetToken: otpCodeHashed,
         passwordResetExpires: resetExpires,
       },
     });
 
-    const resetUrl = `${process.env.CLIENT_URL || "http://localhost:3000"}/auth/reset-password?token=${resetTokenPlain}&email=${emailLower}`;
-
-    // Send email via email service
+    // Send email via Brevo email service
     const { sendPasswordResetEmail } = require("../../services/email.service");
-    await sendPasswordResetEmail(emailLower, resetUrl);
+    await sendPasswordResetEmail(emailLower, otpCode);
 
     res.status(200).json({
       success: true,
-      message: "If that email exists in our system, a password reset link has been sent.",
-      ...(process.env.NODE_ENV !== "production" ? { dev_link: resetUrl } : {}),
+      message: `A 6-digit verification code has been sent to ${emailLower} via Brevo.`,
+      ...(process.env.NODE_ENV !== "production" ? { dev_otp: otpCode } : {}),
     });
   } catch (error) {
     console.error("Forgot Password Error:", error.message);
@@ -503,23 +502,26 @@ const forgotPassword = async (req, res) => {
 };
 
 /**
- * @desc    Reset password using reset token
+ * @desc    Reset password using 6-digit OTP code or reset token
  * @route   POST /api/auth/reset-password
  * @access  Public
  */
 const resetPassword = async (req, res) => {
   try {
-    const { token, email, password } = req.body;
-    if (!token || !email || !password) {
+    const { token, otpCode, email, password, newPassword } = req.body;
+    const providedCode = (otpCode || token || "").toString().trim();
+    const targetPassword = password || newPassword;
+
+    if (!providedCode || !email || !targetPassword) {
       return res.status(400).json({
         success: false,
-        message: "Token, email, and new password are required",
+        message: "Verification code, email address, and new password are required.",
       });
     }
 
     const emailLower = email.toLowerCase().trim();
     const crypto = require("crypto");
-    const resetTokenHashed = crypto.createHash("sha256").update(token).digest("hex");
+    const codeHashed = crypto.createHash("sha256").update(providedCode).digest("hex");
 
     const user = await prisma.user.findUnique({
       where: { email: emailLower },
@@ -527,18 +529,18 @@ const resetPassword = async (req, res) => {
 
     if (
       !user ||
-      user.passwordResetToken !== resetTokenHashed ||
+      user.passwordResetToken !== codeHashed ||
       new Date() > new Date(user.passwordResetExpires)
     ) {
       return res.status(400).json({
         success: false,
-        message: "Token is invalid or has expired",
+        message: "Verification code is invalid or has expired. Please request a new code.",
       });
     }
 
     // Hash the new password
     const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
+    const hashedPassword = await bcrypt.hash(targetPassword, salt);
 
     // Save updated password and clear reset token
     await prisma.user.update({
@@ -563,6 +565,101 @@ const resetPassword = async (req, res) => {
   }
 };
 
+/**
+ * @desc    Change password for logged-in user
+ * @route   PUT /api/auth/change-password
+ * @access  Private
+ */
+const changePassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    const userId = req.user.id;
+
+    if (!newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "New password is required",
+      });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    // If user has existing password, verify current password
+    if (user.password && currentPassword) {
+      const isMatch = await bcrypt.compare(currentPassword, user.password);
+      if (!isMatch) {
+        return res.status(400).json({
+          success: false,
+          message: "Current password is incorrect",
+        });
+      }
+    }
+
+    // Hash new password
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+    // Save updated password in PostgreSQL database
+    await prisma.user.update({
+      where: { id: userId },
+      data: {
+        password: hashedPassword,
+        passwordResetToken: null,
+        passwordResetExpires: null,
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Password updated successfully in database",
+    });
+  } catch (error) {
+    console.error("Change Password Error:", error.message);
+    res.status(500).json({
+      success: false,
+      message: "An error occurred while updating password",
+    });
+  }
+};
+
+/**
+ * @desc    Send registration / verification email code
+ * @route   POST /api/auth/send-verification
+ * @access  Public
+ */
+const sendVerification = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ success: false, message: "Email is required" });
+    }
+
+    const emailLower = email.toLowerCase().trim();
+    const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+
+    const { sendVerificationEmail } = require("../../services/email.service");
+    await sendVerificationEmail(emailLower, verificationCode);
+
+    res.status(200).json({
+      success: true,
+      message: `Verification code sent to ${emailLower} via Brevo`,
+      ...(process.env.NODE_ENV !== "production" ? { dev_code: verificationCode } : {}),
+    });
+  } catch (error) {
+    console.error("Send Verification Error:", error.message);
+    res.status(500).json({ success: false, message: "An error occurred while sending verification email" });
+  }
+};
+
 module.exports = {
   register,
   login,
@@ -571,4 +668,6 @@ module.exports = {
   updateProfile,
   forgotPassword,
   resetPassword,
+  changePassword,
+  sendVerification,
 };

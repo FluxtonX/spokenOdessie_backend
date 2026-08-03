@@ -1,7 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 const router = express.Router();
-const { register, login, googleLogin, getMe, updateProfile, forgotPassword, resetPassword } = require("./auth.controller");
+const { register, login, googleLogin, getMe, updateProfile, forgotPassword, resetPassword, changePassword, sendVerification } = require("./auth.controller");
 const { protect } = require("../../middlewares/auth.middleware");
 
 const profileUpload = multer({
@@ -23,12 +23,14 @@ router.post("/login", login);
 router.post("/google", googleLogin);
 router.post("/forgot-password", forgotPassword);
 router.post("/reset-password", resetPassword);
+router.post("/send-verification", sendVerification);
 
 // Compatibility alias for frontend syncing
 router.post("/sync", protect, getMe);
 
 // Protected Auth Routes
 router.get("/me", protect, getMe);
+router.put("/change-password", protect, changePassword);
 router.put(
   "/profile",
   protect,
