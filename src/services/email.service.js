@@ -97,26 +97,29 @@ const sendPasswordResetEmail = async (email, otpCode) => {
     </html>
   `;
 
-  if (transporter) {
-    try {
-      const info = await transporter.sendMail({
-        from: getFromHeader(),
-        to: email,
-        subject: `Spoken Odyssey Password Reset Code: ${otpCode}`,
-        text: textContent,
-        html: htmlContent,
-        headers: {
-          "X-Priority": "1 (Highest)",
-          "X-MSMail-Priority": "High",
-          "Importance": "High",
-        },
-      });
-      console.log("✅ Brevo Password Reset OTP Email delivered to:", email, "| MessageID:", info.messageId);
-      return info;
-    } catch (err) {
-      console.error("❌ Failed to send Password Reset Email via Brevo SMTP:", err.message);
-      throw err;
-    }
+  if (!transporter) {
+    console.error("❌ Brevo SMTP failed: SMTP_USER or SMTP_PASS environment variables are missing from process.env.");
+    throw new Error("Email service misconfigured: Brevo SMTP credentials (SMTP_USER/SMTP_PASS) missing on server.");
+  }
+
+  try {
+    const info = await transporter.sendMail({
+      from: getFromHeader(),
+      to: email,
+      subject: `Spoken Odyssey Password Reset Code: ${otpCode}`,
+      text: textContent,
+      html: htmlContent,
+      headers: {
+        "X-Priority": "1 (Highest)",
+        "X-MSMail-Priority": "High",
+        "Importance": "High",
+      },
+    });
+    console.log("✅ Brevo Password Reset OTP Email delivered to:", email, "| MessageID:", info.messageId);
+    return info;
+  } catch (err) {
+    console.error("❌ Failed to send Password Reset Email via Brevo SMTP:", err.message);
+    throw err;
   }
 };
 
@@ -183,20 +186,23 @@ const sendVerificationEmail = async (email, verificationCode) => {
     </html>
   `;
 
-  if (transporter) {
-    try {
-      const info = await transporter.sendMail({
-        from: getFromHeader(),
-        to: email,
-        subject: `${verificationCode} is your Spoken Odyssey verification code`,
-        html: htmlContent,
-      });
-      console.log("✅ Brevo Verification Email delivered to:", email, "| MessageID:", info.messageId);
-      return info;
-    } catch (err) {
-      console.error("❌ Failed to send Verification Email via Brevo SMTP:", err.message);
-      throw err;
-    }
+  if (!transporter) {
+    console.error("❌ Brevo SMTP failed: SMTP_USER or SMTP_PASS environment variables are missing from process.env.");
+    throw new Error("Email service misconfigured: Brevo SMTP credentials (SMTP_USER/SMTP_PASS) missing on server.");
+  }
+
+  try {
+    const info = await transporter.sendMail({
+      from: getFromHeader(),
+      to: email,
+      subject: `${verificationCode} is your Spoken Odyssey verification code`,
+      html: htmlContent,
+    });
+    console.log("✅ Brevo Verification Email delivered to:", email, "| MessageID:", info.messageId);
+    return info;
+  } catch (err) {
+    console.error("❌ Failed to send Verification Email via Brevo SMTP:", err.message);
+    throw err;
   }
 };
 
