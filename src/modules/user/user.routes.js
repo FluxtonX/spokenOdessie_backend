@@ -24,7 +24,8 @@ router.post("/family/invitations/sms", protect, rateLimiters.sms, controller.sen
 router.post("/family/invitations/link", protect, rateLimiters.invitation, controller.createLinkInvitation);
 router.post("/family/invitations/qr", protect, rateLimiters.invitation, controller.createQRInvitation);
 router.get("/family/invitations/validate", rateLimiters.general, controller.validateInvitationToken);
-router.get("/family/invitations/accept-token", protect, rateLimiters.strict, controller.acceptInvitationViaToken);
+router.get("/family/badge-count", protect, controller.getFamilyBadgeCount);
+router.post("/family/mark-seen", protect, controller.markFamilySeen);
 router.get("/:id", optionalProtect, controller.getUserById);
 
 module.exports = router;

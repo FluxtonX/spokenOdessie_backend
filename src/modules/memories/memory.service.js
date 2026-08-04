@@ -436,6 +436,12 @@ const updateMemory = async ({
   memoryId,
   title,
   description,
+  privacy,
+  tags,
+  mood,
+  status,
+  occurredAt,
+  albumId,
   color,
   backgroundId,
   fontId,
@@ -445,10 +451,17 @@ const updateMemory = async ({
   mediaOriginalName,
   mediaList,
 }) => {
-  const memory = await memoryRepository.findByIdAndOwnerFirebaseUid(
+  let memory = await memoryRepository.findByIdAndOwnerFirebaseUid(
     memoryId,
     user.id
   );
+
+  // Fallback lookup if client passed temporary/legacy ID
+  if (!memory && title && typeof title === "string") {
+    memory = await prisma.memory.findFirst({
+      where: { ownerId: user.id, title: { mode: "insensitive", equals: title.trim() } }
+    });
+  }
 
   if (!memory) {
     const error = new Error("Memory could not be found.");
@@ -465,13 +478,57 @@ const updateMemory = async ({
     throw error;
   }
 
+  let album = null;
+  if (albumId) {
+    album = await prisma.album.findFirst({
+      where: { id: albumId, ownerId: user.id }
+    });
+  }
+
+  // Parse tags
+  let parsedTags = memory.tags || [];
+  if (Array.isArray(tags)) {
+    parsedTags = tags.map(t => String(t).trim().toLowerCase()).filter(Boolean);
+  } else if (typeof tags === "string") {
+    try {
+      const arr = JSON.parse(tags);
+      if (Array.isArray(arr)) parsedTags = arr.map(t => String(t).trim().toLowerCase()).filter(Boolean);
+      else parsedTags = tags.split(",").map(t => t.trim().toLowerCase()).filter(Boolean);
+    } catch (_) {
+      parsedTags = tags.split(",").map(t => t.trim().toLowerCase()).filter(Boolean);
+    }
+  }
+
+  // Auto extract tags from title and description
+  const contentText = `${normalizedTitle} ${normalizedDescription}`.toLowerCase();
+  const autoTags = [];
+  for (const [tagKey, keywords] of Object.entries(INTEREST_KEYWORDS)) {
+    if (keywords.some(keyword => contentText.includes(keyword))) {
+      autoTags.push(tagKey);
+    }
+  }
+  const finalTags = Array.from(new Set([...parsedTags, ...autoTags]));
+
   const payload = {
     title: normalizedTitle,
     description: normalizedDescription,
+    privacy: typeof privacy === "string" ? privacy.trim() : memory.privacy || "Public",
+    tags: finalTags,
+    mood: typeof mood === "string" ? mood.trim() : memory.mood || "",
+    status: typeof status === "string" ? status.trim() : memory.status || "published",
     color: typeof color === "string" ? color.trim() : memory.color || "",
     backgroundId: typeof backgroundId === "string" ? backgroundId.trim() : memory.backgroundId || "none",
     fontId: typeof fontId === "string" ? fontId.trim() : memory.fontId || "default",
   };
+
+  if (album) {
+    payload.albumId = album.id;
+    payload.albumTitle = album.title;
+  }
+
+  if (occurredAt) {
+    payload.occurredAt = normalizeOccurredAt(occurredAt);
+  }
 
   let uploadedMediaList = [];
   if (files && files.length > 0) {
@@ -831,27 +888,44 @@ const shareMemory = async ({ memoryId }) => {
   };
 };
 
-const getDiscoveryMemories = async ({ user, filter = "public", theme, q }) => {
+const getDiscoveryMemories = async ({ user, filter = "public", theme, q, page = 1, limit = 20 }) => {
   let query = {};
 
   const cleanTheme = (theme || "").trim();
   const cleanFilter = (filter || "").trim();
+  const pageNum = Math.max(1, parseInt(page, 10) || 1);
+  const pageSize = Math.min(50, Math.max(1, parseInt(limit, 10) || 20));
+
+  // Fetch current user's following list & family connections for recommendation scoring
+  let myFollowingUids = [];
+  let myFamilyUids = [];
+  if (user?.id) {
+    try {
+      const [follows, connections] = await Promise.all([
+        prisma.follow.findMany({ where: { followerId: user.id }, select: { followingId: true } }),
+        prisma.familyConnection.findMany({
+          where: { OR: [{ user1Id: user.id }, { user2Id: user.id }] }
+        })
+      ]);
+      myFollowingUids = follows.map(f => f.followingId);
+      myFamilyUids = connections.map(c => c.user1Id === user.id ? c.user2Id : c.user1Id);
+    } catch (_) {}
+  }
+
+  // Explicit Public Privacy Clause (matches "Public", "public", or "everyone")
+  const publicPrivacyClause = {
+    OR: [
+      { privacy: { mode: "insensitive", contains: "public" } },
+      { privacy: { mode: "insensitive", contains: "everyone" } },
+      { privacy: "Public" },
+      { privacy: "public" },
+    ]
+  };
 
   // If user selected Family filter
   if (cleanTheme === "Family" || cleanFilter.toLowerCase() === "family") {
-    let familyOwnerIds = [];
-    if (user?.id) {
-      const connections = await prisma.familyConnection.findMany({
-        where: {
-          OR: [
-            { user1Id: user.id },
-            { user2Id: user.id }
-          ]
-        }
-      });
-      familyOwnerIds = connections.map(c => c.user1Id === user.id ? c.user2Id : c.user1Id);
-      familyOwnerIds.push(user.id);
-    }
+    let familyOwnerIds = [...myFamilyUids];
+    if (user?.id) familyOwnerIds.push(user.id);
 
     if (familyOwnerIds.length > 0) {
       query.OR = [
@@ -866,13 +940,8 @@ const getDiscoveryMemories = async ({ user, filter = "public", theme, q }) => {
       ];
     }
   } else {
-    // Default: Show 100% Public Memories Only across all database users
-    query.OR = [
-      { privacy: { mode: "insensitive", contains: "public" } },
-      { privacy: { mode: "insensitive", contains: "everyone" } },
-      { privacy: "Public" },
-      { privacy: "public" },
-    ];
+    // Show 100% Public Memories Only across all database users
+    query = { ...publicPrivacyClause };
   }
 
   const conditions = [];
@@ -899,17 +968,30 @@ const getDiscoveryMemories = async ({ user, filter = "public", theme, q }) => {
         { description: { contains: cleanKw, mode: "insensitive" } },
         { mood: { contains: cleanKw, mode: "insensitive" } },
         { tags: { hasSome: [cleanKw] } },
+        { owner: { is: { displayName: { contains: cleanKw, mode: "insensitive" } } } },
       ];
     });
     conditions.push({ OR: searchConditions });
   }
 
   if (conditions.length > 0) {
-    query.AND = conditions;
+    if (query.OR) {
+      query = {
+        AND: [
+          { OR: query.OR },
+          ...conditions
+        ]
+      };
+    } else {
+      query.AND = conditions;
+    }
   }
 
-  // Execute query and serialize with owner profile
-  const memories = await prisma.memory.findMany({
+  // Count total matching memories
+  const totalCount = await prisma.memory.count({ where: query });
+
+  // Execute query with owner relation and fetch candidate batch
+  const candidateMemories = await prisma.memory.findMany({
     where: query,
     include: {
       owner: true
@@ -918,7 +1000,39 @@ const getDiscoveryMemories = async ({ user, filter = "public", theme, q }) => {
     take: 100
   });
 
-  return Promise.all(memories.map((m) => serializeMemory(m, user)));
+  // Calculate recommendation scores for social ranking
+  const scoredMemories = candidateMemories.map((m) => {
+    const isFollowed = myFollowingUids.includes(m.ownerId);
+    const isFamily = myFamilyUids.includes(m.ownerId);
+    const engagementScore = (m.likes || 0) * 3 + (m.commentsCount || 0) * 5 + (m.shares || 0) * 4;
+    const affinityScore = (isFollowed ? 50 : 0) + (isFamily ? 40 : 0);
+    
+    // Recency score (newer memories score higher)
+    const ageInHours = (Date.now() - new Date(m.createdAt).getTime()) / (1000 * 60 * 60);
+    const recencyScore = Math.max(0, 100 - ageInHours);
+
+    return {
+      memory: m,
+      score: engagementScore + affinityScore + recencyScore
+    };
+  });
+
+  // Rank by score descending
+  scoredMemories.sort((a, b) => b.score - a.score);
+
+  // Apply pagination
+  const startIndex = (pageNum - 1) * pageSize;
+  const paginatedMemories = scoredMemories.slice(startIndex, startIndex + pageSize).map(item => item.memory);
+
+  const serializedList = await Promise.all(paginatedMemories.map((m) => serializeMemory(m, user)));
+
+  return {
+    memories: serializedList,
+    page: pageNum,
+    limit: pageSize,
+    total: totalCount,
+    hasMore: startIndex + pageSize < totalCount
+  };
 };
 
 module.exports = {

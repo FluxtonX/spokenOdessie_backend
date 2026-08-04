@@ -48,6 +48,100 @@ const getFeaturedPeople = async ({ currentUser, category, query }) => {
     whereClause.id = { not: currentUserId };
   }
 
+  // Get current user's social graph (following, followers, family connections)
+  let myFollowingUids = [];
+  let myFollowerUids = [];
+  let myFamilyUids = [];
+  if (currentUserId) {
+    try {
+      const [myFollows, myFollowers, myConnections] = await Promise.all([
+        prisma.follow.findMany({
+          where: { followerId: currentUserId },
+          select: { followingId: true }
+        }),
+        prisma.follow.findMany({
+          where: { followingId: currentUserId },
+          select: { followerId: true }
+        }),
+        prisma.familyConnection.findMany({
+          where: {
+            OR: [
+              { user1Id: currentUserId },
+              { user2Id: currentUserId }
+            ]
+          }
+        })
+      ]);
+      myFollowingUids = myFollows.map(f => f.followingId);
+      myFollowerUids = myFollowers.map(f => f.followerId);
+      myFamilyUids = myConnections.map(c => c.user1Id === currentUserId ? c.user2Id : c.user1Id);
+    } catch (err) {
+      console.warn("Failed to fetch user social graph:", err.message);
+    }
+  }
+
+  const cleanCategory = (category || "").trim();
+  const categoryLower = cleanCategory.toLowerCase();
+
+  const categoryConditions = [];
+
+  if (cleanCategory && cleanCategory !== "All People" && cleanCategory !== "All") {
+    if (categoryLower.includes("family")) {
+      const familyIds = myFamilyUids.filter(id => id !== currentUserId);
+      if (familyIds.length > 0) {
+        categoryConditions.push({ id: { in: familyIds } });
+      } else {
+        // Fallback: search users with family in profession, bio, or relationship invitations
+        categoryConditions.push({
+          OR: [
+            { bio: { contains: "family", mode: "insensitive" } },
+            { profession: { contains: "family", mode: "insensitive" } }
+          ]
+        });
+      }
+    } else if (categoryLower.includes("mutual")) {
+      // Find 2nd degree connections (people followed by users I follow, or people who follow users I follow)
+      if (myFollowingUids.length > 0 || myFamilyUids.length > 0) {
+        const secondDegreeFollows = await prisma.follow.findMany({
+          where: {
+            followerId: { in: myFollowingUids }
+          },
+          select: { followingId: true }
+        });
+        const secondDegreeUids = Array.from(new Set([
+          ...secondDegreeFollows.map(f => f.followingId),
+          ...myFamilyUids
+        ])).filter(id => id !== currentUserId);
+
+        if (secondDegreeUids.length > 0) {
+          categoryConditions.push({ id: { in: secondDegreeUids } });
+        }
+      }
+    } else if (categoryLower.includes("design") || categoryLower.includes("tech")) {
+      const techKeywords = ["design", "designer", "tech", "developer", "engineer", "software", "architect", "ui", "ux", "frontend", "backend", "code", "data", "ai", "product"];
+      const keywordOr = techKeywords.flatMap(kw => [
+        { profession: { contains: kw, mode: "insensitive" } },
+        { bio: { contains: kw, mode: "insensitive" } },
+        { interests: { contains: kw, mode: "insensitive" } },
+        { projects: { contains: kw, mode: "insensitive" } },
+        { goals: { contains: kw, mode: "insensitive" } },
+      ]);
+      keywordOr.push({ expertise: { hasSome: techKeywords } });
+      categoryConditions.push({ OR: keywordOr });
+    } else if (categoryLower.includes("story") || categoryLower.includes("writer") || categoryLower.includes("historian")) {
+      const writingKeywords = ["story", "storyteller", "writer", "author", "historian", "poet", "journalist", "creator", "biographer", "memoir", "book"];
+      const keywordOr = writingKeywords.flatMap(kw => [
+        { profession: { contains: kw, mode: "insensitive" } },
+        { bio: { contains: kw, mode: "insensitive" } },
+        { interests: { contains: kw, mode: "insensitive" } },
+        { lessons: { contains: kw, mode: "insensitive" } },
+      ]);
+      keywordOr.push({ expertise: { hasSome: writingKeywords } });
+      categoryConditions.push({ OR: keywordOr });
+    }
+  }
+
+  // Handle search query
   if (query && query.trim()) {
     const keywords = query.trim().split(/\s+/).filter(Boolean);
     const searchConditions = keywords.flatMap((kw) => [
@@ -56,31 +150,69 @@ const getFeaturedPeople = async ({ currentUser, category, query }) => {
       { profession: { contains: kw, mode: "insensitive" } },
       { bio: { contains: kw, mode: "insensitive" } },
       { location: { contains: kw, mode: "insensitive" } },
+      { interests: { contains: kw, mode: "insensitive" } },
+      { projects: { contains: kw, mode: "insensitive" } },
     ]);
-    whereClause.OR = searchConditions;
+    categoryConditions.push({ OR: searchConditions });
   }
 
-  const users = await prisma.user.findMany({
+  if (categoryConditions.length > 0) {
+    whereClause.AND = categoryConditions;
+  }
+
+  const orderBy = categoryLower.includes("followed")
+    ? { followers: { _count: "desc" } }
+    : { createdAt: "desc" };
+
+  let users = await prisma.user.findMany({
     where: whereClause,
     include: {
       _count: {
         select: { followers: true }
       },
-      followers: currentUserId ? {
-        where: { followerId: currentUserId }
-      } : false
+      followers: true
     },
     take: 50,
-    orderBy: { createdAt: "desc" }
+    orderBy
   });
+
+  // Fallback for "Mutual Connections" if 0 2nd-degree results were found (e.g. new user)
+  let isFallback = false;
+  if (categoryLower.includes("mutual") && users.length === 0) {
+    isFallback = true;
+    const fallbackWhere = { isActive: true };
+    if (currentUserId) fallbackWhere.id = { not: currentUserId };
+
+    users = await prisma.user.findMany({
+      where: fallbackWhere,
+      include: {
+        _count: { select: { followers: true } },
+        followers: true
+      },
+      take: 20,
+      orderBy: { followers: { _count: "desc" } }
+    });
+  }
 
   return Promise.all(
     users.map(async (u) => {
       const serialized = await serializeUser(u);
+      const userFollowerIds = (u.followers || []).map(f => f.followerId);
+
+      // Compute mutual connections count
+      const mutualFollowersCount = myFollowingUids.filter(id => userFollowerIds.includes(id)).length;
+      const isFamily = myFamilyUids.includes(u.id);
+      const isFollowing = userFollowerIds.includes(currentUserId);
+
+      const totalMutuals = mutualFollowersCount + (isFamily ? 1 : 0);
+
       return {
         ...serialized,
         followersCount: u._count?.followers || 0,
-        isFollowing: Array.isArray(u.followers) && u.followers.length > 0
+        isFollowing,
+        isFamily,
+        mutualConnectionsCount: totalMutuals,
+        isSuggested: isFallback || (totalMutuals === 0 && !isFollowing)
       };
     })
   );
@@ -860,6 +992,75 @@ const getUserById = async ({ currentUser, userId }) => {
   };
 };
 
+const getFamilyBadgeCount = async ({ currentUser }) => {
+  if (!currentUser?.id) return { count: 0 };
+
+  const userId = currentUser.id;
+  const userEmail = currentUser.email?.toLowerCase();
+
+  // 1. Count pending invitations where receiver is current user (by id or email or phone)
+  const pendingInvitesCount = await prisma.familyInvitation.count({
+    where: {
+      status: "PENDING",
+      OR: [
+        { receiverId: userId },
+        ...(userEmail ? [{ email: userEmail }] : []),
+        ...(currentUser.phoneNumber ? [{ phoneNumber: currentUser.phoneNumber }] : [])
+      ]
+    }
+  });
+
+  // 2. If user is an admin of any family circle, count pending approval requests
+  let pendingApprovalsCount = 0;
+  const adminMemberships = await prisma.familyMember.findMany({
+    where: { userId, role: "ADMIN" },
+    select: { familyCircleId: true }
+  });
+
+  if (adminMemberships.length > 0) {
+    const familyCircleIds = adminMemberships.map(m => m.familyCircleId);
+    pendingApprovalsCount = await prisma.familyInvitation.count({
+      where: {
+        familyCircleId: { in: familyCircleIds },
+        status: "ACCEPTED"
+      }
+    });
+  }
+
+  // 3. Count unread notifications related to family
+  const unreadFamilyNotificationsCount = await prisma.notification.count({
+    where: {
+      userId,
+      isRead: false,
+      type: { startsWith: "FAMILY_" }
+    }
+  });
+
+  const totalCount = pendingInvitesCount + pendingApprovalsCount + unreadFamilyNotificationsCount;
+
+  return {
+    count: totalCount,
+    pendingInvitesCount,
+    pendingApprovalsCount,
+    unreadFamilyNotificationsCount
+  };
+};
+
+const markFamilySeen = async ({ currentUser }) => {
+  if (!currentUser?.id) return { success: true };
+
+  await prisma.notification.updateMany({
+    where: {
+      userId: currentUser.id,
+      isRead: false,
+      type: { startsWith: "FAMILY_" }
+    },
+    data: { isRead: true }
+  });
+
+  return { success: true };
+};
+
 module.exports = {
   getSuggestedPeople,
   getFeaturedPeople,
@@ -881,5 +1082,7 @@ module.exports = {
   getFollowingList,
   updateUserActiveStatus,
   getUserById,
+  getFamilyBadgeCount,
+  markFamilySeen,
   serializeUser
 };

@@ -379,6 +379,44 @@ const getUserById = async (req, res) => {
   }
 };
 
+const getFamilyBadgeCount = async (req, res) => {
+  try {
+    const result = await userService.getFamilyBadgeCount({
+      currentUser: req.user,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Get Family Badge Count Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to fetch family badge count",
+    });
+  }
+};
+
+const markFamilySeen = async (req, res) => {
+  try {
+    const result = await userService.markFamilySeen({
+      currentUser: req.user,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Mark Family Seen Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to mark family activity as seen",
+    });
+  }
+};
+
 module.exports = {
   getSuggested,
   getFeatured,
@@ -399,4 +437,6 @@ module.exports = {
   validateInvitationToken,
   acceptInvitationViaToken,
   getUserById,
+  getFamilyBadgeCount,
+  markFamilySeen,
 };
