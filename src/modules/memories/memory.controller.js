@@ -118,6 +118,12 @@ const updateMemory = async (req, res) => {
       memoryId: req.params.id,
       title: req.body.title,
       description: req.body.description,
+      privacy: req.body.privacy || req.body.visibility,
+      tags: req.body.tags,
+      mood: req.body.mood,
+      status: req.body.status,
+      occurredAt: req.body.occurredAt,
+      albumId: req.body.albumId,
       color: req.body.color,
       backgroundId: req.body.backgroundId,
       fontId: req.body.fontId,
@@ -204,16 +210,24 @@ const shareMemory = async (req, res) => {
 
 const getDiscoveryMemories = async (req, res) => {
   try {
-    const memories = await memoryService.getDiscoveryMemories({
+    const result = await memoryService.getDiscoveryMemories({
       user: req.user,
       filter: req.query.filter,
       theme: req.query.theme,
       q: req.query.q,
+      page: req.query.page,
+      limit: req.query.limit,
     });
 
     res.status(200).json({
       success: true,
-      data: memories,
+      data: Array.isArray(result) ? result : (result.memories || []),
+      pagination: Array.isArray(result) ? null : {
+        page: result.page,
+        limit: result.limit,
+        total: result.total,
+        hasMore: result.hasMore,
+      }
     });
   } catch (error) {
     console.error("Get Discovery Memories Error:", error.message);
