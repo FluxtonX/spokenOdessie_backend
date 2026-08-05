@@ -7,7 +7,7 @@ const http = require("http");
 
 const app = require("./app");
 const connectDB = require("./config/db");
-const initializeSocket = require("./socket");
+const { initializeSocket } = require("./socket");
 
 const PORT = process.env.PORT || 5000;
 

@@ -449,6 +449,28 @@ const sendFamilyInvitation = async ({ currentUser, email, firebaseUid, relations
     }
   }
 
+  // Create real-time FAMILY_INVITE_SENT notification for targetUser if they exist in DB
+  if (targetUser && targetUser.id) {
+    try {
+      const { createNotification } = require("../notifications/notification.service");
+      const senderName = currentUser.displayName || currentUser.name || (currentUser.email ? currentUser.email.split("@")[0] : "A family member");
+      await createNotification({
+        userId: targetUser.id,
+        type: "FAMILY_INVITE_SENT",
+        title: "Family Invitation Received",
+        message: `${senderName} invited you to join their Family Circle as ${relationship || "Family Member"}.`,
+        metadata: {
+          invitationId: newInvitation.id,
+          senderId: currentUser.id,
+          relationship: relationship || "Family Member"
+        },
+        actionUrl: "/family"
+      });
+    } catch (notifErr) {
+      console.warn("Failed to create family invite notification:", notifErr.message);
+    }
+  }
+
   return {
     message: `Invitation successfully sent to ${targetUser?.displayName || cleanEmail}!`,
     invitation: newInvitation,

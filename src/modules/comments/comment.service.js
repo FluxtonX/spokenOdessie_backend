@@ -1,4 +1,5 @@
 const prisma = require("../../config/prisma");
+const { sendMemoryEvent } = require("../../socket");
 const { getSignedFileUrl } = require("../../services/s3.service");
 
 const getCommentsForMemory = async ({ currentUser, memoryId }) => {
@@ -120,8 +121,9 @@ const createComment = async ({ user, memoryId, text, parentCommentId }) => {
   }
 
   let validParentId = null;
+  let parentComment = null;
   if (parentCommentId) {
-    const parentComment = await prisma.comment.findUnique({
+    parentComment = await prisma.comment.findUnique({
       where: { id: parentCommentId }
     });
     if (parentComment) {
@@ -146,6 +148,57 @@ const createComment = async ({ user, memoryId, text, parentCommentId }) => {
     }
   });
 
+  // Create real-time notification
+  try {
+    const { createNotification } = require("../notifications/notification.service");
+    const authorName = user.displayName || user.name || (user.email ? user.email.split("@")[0] : "Someone");
+    const snippet = text.length > 40 ? `${text.slice(0, 40)}...` : text;
+
+    if (validParentId && parentComment && parentComment.ownerId !== user.id) {
+      // Notification for comment reply
+      await createNotification({
+        userId: parentComment.ownerId,
+        type: "COMMENT_REPLY",
+        title: "New Comment Reply",
+        message: `${authorName} replied to your comment: "${snippet}"`,
+        metadata: {
+          memoryId,
+          commentId: comment.id,
+          parentCommentId: validParentId,
+          replierId: user.id
+        },
+        actionUrl: `/memories?memoryId=${memoryId}`
+      });
+    } else if (!validParentId && memory.ownerId !== user.id) {
+      // Notification for new comment on memory
+      await createNotification({
+        userId: memory.ownerId,
+        type: "MEMORY_COMMENT",
+        title: "New Comment",
+        message: `${authorName} commented on your story "${memory.title || "Untitled"}": "${snippet}"`,
+        metadata: {
+          memoryId,
+          commentId: comment.id,
+          commenterId: user.id
+        },
+        actionUrl: `/memories?memoryId=${memoryId}`
+      });
+    }
+  } catch (notifErr) {
+    console.warn("Failed to create comment notification:", notifErr.message);
+  }
+
+  // Instantly broadcast comment event over WebSocket to all memory viewers
+  try {
+    sendMemoryEvent(memoryId, "comment:new", {
+      memoryId,
+      parentCommentId: validParentId,
+      comment
+    });
+  } catch (wsErr) {
+    console.warn("Failed to push socket comment event:", wsErr.message);
+  }
+
   return comment;
 };
 
@@ -169,6 +222,7 @@ const reactToComment = async ({ user, commentId, type }) => {
   });
 
   let userReaction = type;
+  let wasAddedOrChanged = false;
   
   let reactions = { like: 0, love: 0, haha: 0, wow: 0, sad: 0 };
   if (comment.reactionsCount) {
@@ -202,6 +256,7 @@ const reactToComment = async ({ user, commentId, type }) => {
 
       reactions[oldType] = Math.max(0, (reactions[oldType] || 1) - 1);
       reactions[type] = (reactions[type] || 0) + 1;
+      wasAddedOrChanged = true;
     }
   } else if (type) {
     // Add new reaction
@@ -214,6 +269,7 @@ const reactToComment = async ({ user, commentId, type }) => {
     });
 
     reactions[type] = (reactions[type] || 0) + 1;
+    wasAddedOrChanged = true;
   }
 
   // Update in database
@@ -223,6 +279,45 @@ const reactToComment = async ({ user, commentId, type }) => {
       reactionsCount: reactions
     }
   });
+
+  // Create real-time COMMENT_REACTION notification for comment owner
+  if (wasAddedOrChanged && userReaction && comment.ownerId && comment.ownerId !== user.id) {
+    try {
+      const { createNotification } = require("../notifications/notification.service");
+      const authorName = user.displayName || user.name || (user.email ? user.email.split("@")[0] : "Someone");
+      const emojiMap = { love: "❤️", like: "👍", haha: "😂", wow: "😮", sad: "😢" };
+      const emoji = emojiMap[userReaction] || "❤️";
+
+      await createNotification({
+        userId: comment.ownerId,
+        type: "COMMENT_REACTION",
+        title: "New Reaction on Comment",
+        message: `${authorName} reacted ${emoji} to your comment.`,
+        metadata: {
+          commentId,
+          memoryId: comment.memoryId,
+          reactorId: user.id,
+          reactionType: userReaction
+        },
+        actionUrl: `/memories?memoryId=${comment.memoryId}`
+      });
+    } catch (notifErr) {
+      console.warn("Failed to create comment reaction notification:", notifErr.message);
+    }
+  }
+
+  // Instantly broadcast comment reaction event over WebSocket to all memory viewers
+  try {
+    sendMemoryEvent(comment.memoryId, "comment:reaction", {
+      commentId,
+      memoryId: comment.memoryId,
+      reactions: updatedComment.reactionsCount,
+      userReaction,
+      userId: user.id
+    });
+  } catch (wsErr) {
+    console.warn("Failed to push socket comment reaction event:", wsErr.message);
+  }
 
   return {
     reactions: updatedComment.reactionsCount,

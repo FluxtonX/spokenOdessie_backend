@@ -1,4 +1,5 @@
 const prisma = require("../../config/prisma");
+const { sendNotificationToUser } = require("../../socket");
 
 /**
  * Create a notification for a user
@@ -15,6 +16,14 @@ async function createNotification({ userId, type, title, message, metadata, acti
         actionUrl,
       }
     });
+
+    // Instantly push over WebSocket to recipient's connected sockets
+    try {
+      sendNotificationToUser(userId, notification);
+    } catch (wsErr) {
+      console.warn("Could not push socket notification:", wsErr.message);
+    }
+
     return notification;
   } catch (error) {
     console.error("Failed to create notification:", error);
