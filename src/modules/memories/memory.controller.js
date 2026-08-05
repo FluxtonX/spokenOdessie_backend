@@ -192,6 +192,7 @@ const reactToMemory = async (req, res) => {
 const shareMemory = async (req, res) => {
   try {
     const result = await memoryService.shareMemory({
+      user: req.user,
       memoryId: req.params.id,
     });
 

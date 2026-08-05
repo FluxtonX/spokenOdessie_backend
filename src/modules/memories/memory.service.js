@@ -424,6 +424,64 @@ const createMemory = async ({
     });
   }
 
+  if (normalizedStatus === "published") {
+    // Notify followers and family members in real-time
+    try {
+      const { createNotification } = require("../notifications/notification.service");
+      const authorName = getOwnerDisplayName(userDoc || user);
+      const privacyType = String(privacy || "Private").toLowerCase();
+
+      let targetUserIds = [];
+
+      if (privacyType === "public") {
+        // Fetch all followers of the creator
+        const followers = await prisma.follow.findMany({
+          where: {
+            OR: [
+              { followingId: user.id },
+              ...(user.googleId ? [{ followingId: user.googleId }] : []),
+              ...(user.email ? [{ followingId: user.email.toLowerCase() }] : [])
+            ]
+          },
+          select: { followerId: true }
+        });
+        targetUserIds = followers.map(f => f.followerId).filter(id => id && id !== user.id);
+      } else if (privacyType === "family circle" || privacyType === "family") {
+        // Fetch all connected family members
+        const connections = await prisma.familyConnection.findMany({
+          where: {
+            OR: [
+              { user1Id: user.id },
+              { user2Id: user.id }
+            ]
+          }
+        });
+        targetUserIds = connections.map(c => c.user1Id === user.id ? c.user2Id : c.user1Id).filter(id => id && id !== user.id);
+      }
+
+      // De-duplicate target IDs
+      targetUserIds = Array.from(new Set(targetUserIds));
+
+      // Asynchronously dispatch notifications for all followers / family members
+      for (const targetId of targetUserIds) {
+        createNotification({
+          userId: targetId,
+          type: privacyType.includes("family") ? "FAMILY_MEMORY_SHARED" : "MEMORY_SHARED",
+          title: "New Story Posted",
+          message: `${authorName} posted a new story: "${normalizedTitle}". Click to view.`,
+          metadata: {
+            memoryId: memory.id,
+            authorId: user.id,
+            privacy: memory.privacy
+          },
+          actionUrl: `/memories?memoryId=${memory.id}`
+        }).catch(err => console.warn("Failed to dispatch story post notification to user:", targetId, err.message));
+      }
+    } catch (notifErr) {
+      console.warn("Failed to process story post notifications:", notifErr.message);
+    }
+  }
+
   if (mediaUploadWarning) {
     serializedMemory.mediaUploadWarning = mediaUploadWarning;
   }
@@ -867,6 +925,48 @@ const reactToMemory = async ({ user, memoryId, type }) => {
     try {
       await interactWithMemory({ user, memoryId, type: "like" });
     } catch (_) {}
+
+    // Create real-time MEMORY_LIKE notification for memory owner if reactor is not owner
+    try {
+      const memory = await prisma.memory.findUnique({
+        where: { id: memoryId },
+        select: { ownerId: true, title: true }
+      });
+      if (memory && memory.ownerId && memory.ownerId !== userId) {
+        const { createNotification } = require("../notifications/notification.service");
+        const senderName = user.displayName || user.name || (user.email ? user.email.split("@")[0] : "Someone");
+        const reactionEmoji = result.userReaction === "heart" ? "❤️" : "👍";
+        await createNotification({
+          userId: memory.ownerId,
+          type: "MEMORY_LIKE",
+          title: "New Reaction",
+          message: `${senderName} reacted ${reactionEmoji} to your story "${memory.title || "Untitled"}"`,
+          metadata: {
+            memoryId,
+            reactorId: userId,
+            reactionType: result.userReaction
+          },
+          actionUrl: `/memories?memoryId=${memoryId}`
+        });
+      }
+    } catch (notifErr) {
+      console.warn("Failed to create memory reaction notification:", notifErr.message);
+    }
+  }
+
+  // Instantly broadcast story reaction event over WebSocket to all memory viewers
+  try {
+    const { sendMemoryEvent } = require("../../socket");
+    sendMemoryEvent(memoryId, "memory:reaction", {
+      memoryId,
+      totalReactions: result.totalReactions,
+      likes: result.likes,
+      reactions: result.reactions,
+      userReaction: result.userReaction,
+      userId
+    });
+  } catch (wsErr) {
+    console.warn("Failed to push socket memory reaction event:", wsErr.message);
   }
 
   return {
@@ -877,11 +977,31 @@ const reactToMemory = async ({ user, memoryId, type }) => {
   };
 };
 
-const shareMemory = async ({ memoryId }) => {
+const shareMemory = async ({ user, memoryId }) => {
   const updatedMemory = await prisma.memory.update({
     where: { id: memoryId },
     data: { shares: { increment: 1 } }
   });
+
+  if (user && updatedMemory.ownerId && updatedMemory.ownerId !== user.id) {
+    try {
+      const { createNotification } = require("../notifications/notification.service");
+      const senderName = user.displayName || user.name || (user.email ? user.email.split("@")[0] : "Someone");
+      await createNotification({
+        userId: updatedMemory.ownerId,
+        type: "MEMORY_SHARED",
+        title: "Memory Shared",
+        message: `${senderName} shared your story "${updatedMemory.title || "Untitled"}"`,
+        metadata: {
+          memoryId,
+          sharerId: user.id
+        },
+        actionUrl: `/memories?memoryId=${memoryId}`
+      });
+    } catch (notifErr) {
+      console.warn("Failed to create memory share notification:", notifErr.message);
+    }
+  }
 
   return {
     shares: updatedMemory.shares || 0
