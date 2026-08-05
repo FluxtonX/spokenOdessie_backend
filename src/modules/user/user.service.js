@@ -40,28 +40,41 @@ const getSuggestedPeople = async ({ currentUser }) => {
 
 const getFeaturedPeople = async ({ currentUser, category, query }) => {
   const currentUserId = currentUser?.id;
-  const whereClause = {
-    isActive: true,
-  };
+  console.log("[getFeaturedPeople] currentUser:", currentUserId ? { id: currentUserId, email: currentUser?.email } : "UNAUTHENTICATED");
+  const currentUserLocation = (currentUser?.location || "").trim().toLowerCase();
 
-  if (currentUserId) {
-    whereClause.id = { not: currentUserId };
-  }
+  const locationTerms = currentUserLocation
+    .split(/[,;\s]+/)
+    .map(t => t.trim().toLowerCase())
+    .filter(t => t.length > 2);
 
-  // Get current user's social graph (following, followers, family connections)
-  let myFollowingUids = [];
-  let myFollowerUids = [];
+  // Get current user's social graph with follow timestamps
+  let myFollows = [];
+  let myFollowers = [];
   let myFamilyUids = [];
+
   if (currentUserId) {
     try {
-      const [myFollows, myFollowers, myConnections] = await Promise.all([
+      const [follows, followers, connections] = await Promise.all([
         prisma.follow.findMany({
-          where: { followerId: currentUserId },
-          select: { followingId: true }
+          where: {
+            OR: [
+              { followerId: currentUserId },
+              ...(currentUser.googleId ? [{ followerId: currentUser.googleId }] : []),
+              ...(currentUser.email ? [{ followerId: currentUser.email.toLowerCase() }] : [])
+            ]
+          },
+          select: { followingId: true, createdAt: true }
         }),
         prisma.follow.findMany({
-          where: { followingId: currentUserId },
-          select: { followerId: true }
+          where: {
+            OR: [
+              { followingId: currentUserId },
+              ...(currentUser.googleId ? [{ followingId: currentUser.googleId }] : []),
+              ...(currentUser.email ? [{ followingId: currentUser.email.toLowerCase() }] : [])
+            ]
+          },
+          select: { followerId: true, createdAt: true }
         }),
         prisma.familyConnection.findMany({
           where: {
@@ -72,13 +85,85 @@ const getFeaturedPeople = async ({ currentUser, category, query }) => {
           }
         })
       ]);
-      myFollowingUids = myFollows.map(f => f.followingId);
-      myFollowerUids = myFollowers.map(f => f.followerId);
-      myFamilyUids = myConnections.map(c => c.user1Id === currentUserId ? c.user2Id : c.user1Id);
+      myFollows = follows;
+      myFollowers = followers;
+      myFamilyUids = connections.map(c => c.user1Id === currentUserId ? c.user2Id : c.user1Id);
     } catch (err) {
       console.warn("Failed to fetch user social graph:", err.message);
     }
   }
+
+  const followMap = new Map(); // followingId -> createdAt timestamp
+  myFollows.forEach(f => followMap.set(f.followingId, f.createdAt));
+
+  const followerMap = new Map(); // followerId -> createdAt timestamp
+  myFollowers.forEach(f => followerMap.set(f.followerId, f.createdAt));
+  console.log("[getFeaturedPeople] myFollows count:", myFollows.length, "myFollowers count:", myFollowers.length, "followerIds:", Array.from(followerMap.keys()));
+
+  // Resolve ALL identifiers (id, googleId, email) for followers and followings
+  const followerUserIds = myFollowers.map(f => f.followerId).filter(Boolean);
+  const followingUserIds = myFollows.map(f => f.followingId).filter(Boolean);
+
+  const [followerUsersData, followingUsersData] = await Promise.all([
+    followerUserIds.length > 0 ? prisma.user.findMany({
+      where: {
+        OR: [
+          { id: { in: followerUserIds } },
+          { googleId: { in: followerUserIds } },
+          { email: { in: followerUserIds.map(e => String(e).toLowerCase()) } }
+        ]
+      },
+      select: { id: true, googleId: true, email: true }
+    }) : [],
+    followingUserIds.length > 0 ? prisma.user.findMany({
+      where: {
+        OR: [
+          { id: { in: followingUserIds } },
+          { googleId: { in: followingUserIds } },
+          { email: { in: followingUserIds.map(e => String(e).toLowerCase()) } }
+        ]
+      },
+      select: { id: true, googleId: true, email: true }
+    }) : []
+  ]);
+
+  const canonicalFollowerSet = new Set();
+  myFollowers.forEach(f => { if (f.followerId) canonicalFollowerSet.add(f.followerId); });
+  followerUsersData.forEach(u => {
+    if (u.id) canonicalFollowerSet.add(u.id);
+    if (u.googleId) canonicalFollowerSet.add(u.googleId);
+    if (u.email) canonicalFollowerSet.add(u.email.toLowerCase());
+  });
+
+  const canonicalFollowingSet = new Set();
+  myFollows.forEach(f => { if (f.followingId) canonicalFollowingSet.add(f.followingId); });
+  followingUsersData.forEach(u => {
+    if (u.id) canonicalFollowingSet.add(u.id);
+    if (u.googleId) canonicalFollowingSet.add(u.googleId);
+    if (u.email) canonicalFollowingSet.add(u.email.toLowerCase());
+  });
+
+  const isUserInSet = (targetUser, idSet) => {
+    if (!targetUser || !idSet || idSet.size === 0) return false;
+    if (targetUser.id && idSet.has(targetUser.id)) return true;
+    if (targetUser.googleId && idSet.has(targetUser.googleId)) return true;
+    if (targetUser.email && idSet.has(targetUser.email.toLowerCase())) return true;
+    return false;
+  };
+
+  // Auto-Disappearance Threshold: 2 hours (120 minutes)
+  const DISAPPEAR_MS = 2 * 60 * 60 * 1000;
+  const nowMs = Date.now();
+
+  // Exclude current user + users followed MORE than 2 hours ago
+  const expiredFollowedUids = Array.from(followMap.entries())
+    .filter(([_, followedAt]) => (nowMs - new Date(followedAt).getTime()) > DISAPPEAR_MS)
+    .map(([uid, _]) => uid);
+
+  const excludedUids = Array.from(new Set([currentUserId, ...expiredFollowedUids])).filter(Boolean);
+
+  // Identify users who follow me but I haven't followed back yet
+  const followBackUids = Array.from(canonicalFollowerSet.keys()).filter(id => id !== currentUserId && !isUserInSet({ id }, canonicalFollowingSet));
 
   const cleanCategory = (category || "").trim();
   const categoryLower = cleanCategory.toLowerCase();
@@ -91,7 +176,6 @@ const getFeaturedPeople = async ({ currentUser, category, query }) => {
       if (familyIds.length > 0) {
         categoryConditions.push({ id: { in: familyIds } });
       } else {
-        // Fallback: search users with family in profession, bio, or relationship invitations
         categoryConditions.push({
           OR: [
             { bio: { contains: "family", mode: "insensitive" } },
@@ -100,7 +184,7 @@ const getFeaturedPeople = async ({ currentUser, category, query }) => {
         });
       }
     } else if (categoryLower.includes("mutual")) {
-      // Find 2nd degree connections (people followed by users I follow, or people who follow users I follow)
+      const myFollowingUids = Array.from(followMap.keys());
       if (myFollowingUids.length > 0 || myFamilyUids.length > 0) {
         const secondDegreeFollows = await prisma.follow.findMany({
           where: {
@@ -156,53 +240,80 @@ const getFeaturedPeople = async ({ currentUser, category, query }) => {
     categoryConditions.push({ OR: searchConditions });
   }
 
+  const whereClause = {
+    isActive: true,
+    id: { notIn: excludedUids }
+  };
+
   if (categoryConditions.length > 0) {
     whereClause.AND = categoryConditions;
   }
 
-  const orderBy = categoryLower.includes("followed")
-    ? { followers: { _count: "desc" } }
-    : { createdAt: "desc" };
-
   let users = await prisma.user.findMany({
     where: whereClause,
     include: {
-      _count: {
-        select: { followers: true }
-      },
+      _count: { select: { followers: true } },
       followers: true
     },
     take: 50,
-    orderBy
+    orderBy: { createdAt: "desc" }
   });
 
-  // Fallback for "Mutual Connections" if 0 2nd-degree results were found (e.g. new user)
-  let isFallback = false;
-  if (categoryLower.includes("mutual") && users.length === 0) {
-    isFallback = true;
-    const fallbackWhere = { isActive: true };
-    if (currentUserId) fallbackWhere.id = { not: currentUserId };
-
-    users = await prisma.user.findMany({
-      where: fallbackWhere,
-      include: {
-        _count: { select: { followers: true } },
-        followers: true
-      },
-      take: 20,
-      orderBy: { followers: { _count: "desc" } }
-    });
+  // Ensure users who follow me (Follow Back candidates) are ALWAYS included
+  if (followBackUids.length > 0) {
+    const missingFollowBackUids = followBackUids.filter(id => !users.some(u => u.id === id || u.googleId === id || u.email === id));
+    if (missingFollowBackUids.length > 0) {
+      const followBackUsers = await prisma.user.findMany({
+        where: {
+          isActive: true,
+          OR: [
+            { id: { in: missingFollowBackUids } },
+            { googleId: { in: missingFollowBackUids } },
+            { email: { in: missingFollowBackUids.map(e => String(e).toLowerCase()) } }
+          ]
+        },
+        include: {
+          _count: { select: { followers: true } },
+          followers: true
+        }
+      });
+      users = [...followBackUsers, ...users];
+    }
   }
 
+  // Rank & Sort Users:
+  // 1. Follow Back Candidates (isFollowerOfMe && !isFollowing)
+  // 2. Location Proximity (nearest users matching city/country)
+  // 3. Newest Registered Users (createdAt desc)
+  users.sort((a, b) => {
+    const aFollowsMe = isUserInSet(a, canonicalFollowerSet) && !isUserInSet(a, canonicalFollowingSet);
+    const bFollowsMe = isUserInSet(b, canonicalFollowerSet) && !isUserInSet(b, canonicalFollowingSet);
+    if (aFollowsMe && !bFollowsMe) return -1;
+    if (!aFollowsMe && bFollowsMe) return 1;
+
+    const aLoc = (a.location || "").toLowerCase();
+    const bLoc = (b.location || "").toLowerCase();
+
+    const aLocMatch = locationTerms.length > 0 && locationTerms.some(term => aLoc.includes(term));
+    const bLocMatch = locationTerms.length > 0 && locationTerms.some(term => bLoc.includes(term));
+
+    if (aLocMatch && !bLocMatch) return -1;
+    if (!aLocMatch && bLocMatch) return 1;
+
+    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+  });
+
+  const myFollowingUids = Array.from(followMap.keys());
+
   return Promise.all(
-    users.map(async (u) => {
+    users.slice(0, 50).map(async (u) => {
       const serialized = await serializeUser(u);
       const userFollowerIds = (u.followers || []).map(f => f.followerId);
 
-      // Compute mutual connections count
       const mutualFollowersCount = myFollowingUids.filter(id => userFollowerIds.includes(id)).length;
       const isFamily = myFamilyUids.includes(u.id);
-      const isFollowing = userFollowerIds.includes(currentUserId);
+      const isFollowing = isUserInSet(u, canonicalFollowingSet);
+      const isFollowerOfMe = isUserInSet(u, canonicalFollowerSet);
 
       const totalMutuals = mutualFollowersCount + (isFamily ? 1 : 0);
 
@@ -210,9 +321,10 @@ const getFeaturedPeople = async ({ currentUser, category, query }) => {
         ...serialized,
         followersCount: u._count?.followers || 0,
         isFollowing,
+        isFollowerOfMe,
         isFamily,
         mutualConnectionsCount: totalMutuals,
-        isSuggested: isFallback || (totalMutuals === 0 && !isFollowing)
+        isSuggested: true
       };
     })
   );
@@ -859,16 +971,23 @@ const disconnectFamilyMember = async ({ currentUser, targetFirebaseUid }) => {
 };
 
 const followUser = async ({ user, targetUid }) => {
-  const targetUser = await prisma.user.findUnique({
-    where: { id: targetUid }
+  const targetUser = await prisma.user.findFirst({
+    where: {
+      OR: [
+        { id: targetUid },
+        { googleId: targetUid },
+        { email: targetUid ? targetUid.toLowerCase() : "" }
+      ]
+    }
   });
+
   if (!targetUser) {
     const error = new Error("Target user not found");
     error.statusCode = 404;
     throw error;
   }
 
-  if (targetUid === user.id) {
+  if (targetUser.id === user.id) {
     const error = new Error("You cannot follow yourself");
     error.statusCode = 400;
     throw error;
@@ -878,30 +997,57 @@ const followUser = async ({ user, targetUid }) => {
     where: {
       followerId_followingId: {
         followerId: user.id,
-        followingId: targetUid
+        followingId: targetUser.id
       }
     },
     create: {
       followerId: user.id,
-      followingId: targetUid
+      followingId: targetUser.id
     },
     update: {}
   });
+
+  // Create real-time notification for targetUser
+  try {
+    const senderName = user.displayName || user.name || (user.email ? user.email.split("@")[0] : "Someone");
+    await createNotification({
+      userId: targetUser.id,
+      type: "FOLLOW",
+      title: "New Follower",
+      message: `${senderName} started following you.`,
+      senderId: user.id,
+      senderName,
+      senderAvatar: user.photoURL || user.photoKey || user.avatar || null,
+      metadata: { followerId: user.id },
+      actionUrl: `/people/${user.id}`
+    });
+  } catch (notifErr) {
+    console.warn("Failed to create follow notification:", notifErr.message);
+  }
 
   return serializeUser(targetUser);
 };
 
 const unfollowUser = async ({ user, targetUid }) => {
-  await prisma.follow.deleteMany({
+  const targetUser = await prisma.user.findFirst({
     where: {
-      followerId: user.id,
-      followingId: targetUid
+      OR: [
+        { id: targetUid },
+        { googleId: targetUid },
+        { email: targetUid ? targetUid.toLowerCase() : "" }
+      ]
     }
   });
 
-  const targetUser = await prisma.user.findUnique({
-    where: { id: targetUid }
+  const realTargetId = targetUser ? targetUser.id : targetUid;
+
+  await prisma.follow.deleteMany({
+    where: {
+      followerId: user.id,
+      followingId: realTargetId
+    }
   });
+
   return targetUser ? serializeUser(targetUser) : { id: targetUid };
 };
 
@@ -910,7 +1056,23 @@ const getFollowersList = async ({ user }) => {
     where: { followingId: user.id },
     include: { follower: true }
   });
-  return Promise.all(follows.map(f => serializeUser(f.follower)));
+
+  const myFollowings = await prisma.follow.findMany({
+    where: { followerId: user.id },
+    select: { followingId: true }
+  });
+  const myFollowingSet = new Set(myFollowings.map(f => f.followingId));
+
+  return Promise.all(follows.map(async f => {
+    const serialized = await serializeUser(f.follower);
+    const isFollowing = myFollowingSet.has(f.followerId);
+    return {
+      ...serialized,
+      isFollowing,
+      isFollowerOfMe: true,
+      isMutual: isFollowing
+    };
+  }));
 };
 
 const getFollowingList = async ({ user }) => {
@@ -918,7 +1080,23 @@ const getFollowingList = async ({ user }) => {
     where: { followerId: user.id },
     include: { following: true }
   });
-  return Promise.all(follows.map(f => serializeUser(f.following)));
+
+  const myFollowers = await prisma.follow.findMany({
+    where: { followingId: user.id },
+    select: { followerId: true }
+  });
+  const myFollowerSet = new Set(myFollowers.map(f => f.followerId));
+
+  return Promise.all(follows.map(async f => {
+    const serialized = await serializeUser(f.following);
+    const isFollowerOfMe = myFollowerSet.has(f.followingId);
+    return {
+      ...serialized,
+      isFollowing: true,
+      isFollowerOfMe,
+      isMutual: isFollowerOfMe
+    };
+  }));
 };
 
 const updateUserActiveStatus = async ({ currentUser }) => {
@@ -956,10 +1134,7 @@ const getUserById = async ({ currentUser, userId }) => {
           memories: true,
           albums: true
         }
-      },
-      followers: currentUserId ? {
-        where: { followerId: currentUserId }
-      } : false
+      }
     }
   });
 
@@ -981,6 +1156,31 @@ const getUserById = async ({ currentUser, userId }) => {
     }
   });
 
+  let isFollowing = false;
+  let isFollowerOfMe = false;
+
+  if (currentUserId && currentUserId !== targetUser.id) {
+    const currentUserIds = [currentUserId, currentUser?.googleId, currentUser?.email ? currentUser.email.toLowerCase() : ""].filter(Boolean);
+    const targetUserIds = [targetUser.id, targetUser.googleId, targetUser.email ? targetUser.email.toLowerCase() : ""].filter(Boolean);
+
+    const [followRecord, followerRecord] = await Promise.all([
+      prisma.follow.findFirst({
+        where: {
+          followerId: { in: currentUserIds },
+          followingId: { in: targetUserIds }
+        }
+      }),
+      prisma.follow.findFirst({
+        where: {
+          followerId: { in: targetUserIds },
+          followingId: { in: currentUserIds }
+        }
+      })
+    ]);
+    isFollowing = !!followRecord;
+    isFollowerOfMe = !!followerRecord;
+  }
+
   return {
     ...serialized,
     followersCount: targetUser._count?.followers || 0,
@@ -988,7 +1188,9 @@ const getUserById = async ({ currentUser, userId }) => {
     memoriesCount: targetUser._count?.memories || 0,
     albumsCount: targetUser._count?.albums || 0,
     milestonesCount: milestoneCount,
-    isFollowing: Array.isArray(targetUser.followers) && targetUser.followers.length > 0
+    isFollowing,
+    isFollowerOfMe,
+    isMutual: isFollowing && isFollowerOfMe
   };
 };
 

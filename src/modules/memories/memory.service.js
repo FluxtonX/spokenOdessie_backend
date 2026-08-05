@@ -565,7 +565,7 @@ const updateMemory = async ({
   }
 
   const updatedMemory = await memoryRepository.updateByIdAndOwnerFirebaseUid(
-    memoryId,
+    memory.id,
     user.id,
     payload
   );
@@ -947,16 +947,59 @@ const getDiscoveryMemories = async ({ user, filter = "public", theme, q, page = 
   const conditions = [];
 
   if (cleanTheme && cleanTheme !== "All" && cleanTheme !== "All Stories" && cleanTheme !== "Family") {
-    const themeLower = cleanTheme.toLowerCase();
-    const themeParts = themeLower.split(" ").map(p => p.trim()).filter(Boolean);
-    conditions.push({
-      OR: [
-        { tags: { hasSome: themeParts } },
-        { title: { contains: themeLower, mode: "insensitive" } },
-        { description: { contains: themeLower, mode: "insensitive" } },
-        { mood: { contains: themeLower, mode: "insensitive" } },
-      ]
-    });
+    let themeLower = cleanTheme.toLowerCase().replace(/stories|recordings/g, "").trim();
+    if (!themeLower) themeLower = cleanTheme.toLowerCase();
+    const themeParts = cleanTheme.toLowerCase().split(/\s+/).map(p => p.trim()).filter(Boolean);
+
+    if (themeLower === "visual" || themeLower === "photo" || themeLower === "image") {
+      // Visual Stories filter: fetch BOTH photo and video memories
+      conditions.push({
+        OR: [
+          { type: { in: ["photo", "Photo", "PHOTO", "visual", "Visual", "image", "Image", "video", "Video", "VIDEO"] } },
+          { mediaMimeType: { startsWith: "image/" } },
+          { mediaMimeType: { startsWith: "video/" } },
+          { mediaKey: { contains: ".mp4" } },
+          { mediaKey: { contains: ".webm" } },
+          { mediaKey: { contains: ".mov" } },
+          { mediaKey: { contains: ".jpg" } },
+          { mediaKey: { contains: ".jpeg" } },
+          { mediaKey: { contains: ".png" } },
+          { tags: { hasSome: ["visual", "photo", "video", "image"] } },
+          { title: { contains: "photo", mode: "insensitive" } },
+          { title: { contains: "video", mode: "insensitive" } },
+          { title: { contains: "visual", mode: "insensitive" } },
+        ]
+      });
+    } else if (themeLower === "video") {
+      conditions.push({
+        OR: [
+          { type: { in: ["video", "Video", "VIDEO"] } },
+          { mediaMimeType: { startsWith: "video/" } },
+          { mediaKey: { contains: ".mp4" } },
+          { mediaKey: { contains: ".webm" } },
+          { mediaKey: { contains: ".mov" } },
+          { tags: { hasSome: ["video"] } },
+          { title: { contains: "video", mode: "insensitive" } }
+        ]
+      });
+    } else {
+      let typeMatches = [themeLower, themeLower.charAt(0).toUpperCase() + themeLower.slice(1)];
+      if (themeLower === "voice" || themeLower === "audio" || themeLower === "recording") {
+        typeMatches = ["voice", "Voice", "VOICE", "audio", "Audio", "AUDIO"];
+      } else if (themeLower === "written" || themeLower === "text" || themeLower === "journal") {
+        typeMatches = ["written", "Written", "text", "Text", "thought", "Thought", "journal", "Journal", "milestone", "Milestone"];
+      }
+      
+      conditions.push({
+        OR: [
+          { type: { in: typeMatches } },
+          { tags: { hasSome: themeParts } },
+          { title: { contains: themeLower, mode: "insensitive" } },
+          { description: { contains: themeLower, mode: "insensitive" } },
+          { mood: { contains: themeLower, mode: "insensitive" } },
+        ]
+      });
+    }
   }
 
   if (q && q.trim()) {
@@ -990,14 +1033,13 @@ const getDiscoveryMemories = async ({ user, filter = "public", theme, q, page = 
   // Count total matching memories
   const totalCount = await prisma.memory.count({ where: query });
 
-  // Execute query with owner relation and fetch candidate batch
+  // Execute query with owner relation and fetch all matching candidate memories
   const candidateMemories = await prisma.memory.findMany({
     where: query,
     include: {
       owner: true
     },
-    orderBy: { createdAt: "desc" },
-    take: 100
+    orderBy: { createdAt: "desc" }
   });
 
   // Calculate recommendation scores for social ranking

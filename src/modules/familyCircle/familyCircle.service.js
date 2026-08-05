@@ -153,20 +153,62 @@ const getFamilySharedMemories = async ({ currentUser }) => {
     include: { user: true }
   });
 
-  const memberUserIds = members.map(m => m.userId);
+  const memberUserIds = new Set(members.map(m => m.userId));
+  const memberFirebaseUids = new Set(members.map(m => m.user?.firebaseUid).filter(Boolean));
+
+  // Add current user ID & Firebase UID so user's own Family memories render in Shared Memories as well
+  if (currentUser?.id) memberUserIds.add(currentUser.id);
+  if (currentUser?.firebaseUid) memberFirebaseUids.add(currentUser.firebaseUid);
+
+  // Include members from FamilyConnection
+  const connections = await prisma.familyConnection.findMany({
+    where: {
+      OR: [
+        { user1Id: currentUser.id },
+        { user2Id: currentUser.id }
+      ]
+    },
+    include: { user1: true, user2: true }
+  }).catch(() => []);
+
+  connections.forEach(c => {
+    const otherUser = c.user1Id === currentUser.id ? c.user2 : c.user1;
+    if (otherUser) {
+      memberUserIds.add(otherUser.id);
+      if (otherUser.firebaseUid) memberFirebaseUids.add(otherUser.firebaseUid);
+    }
+  });
+
   const relationshipMap = new Map();
   members.forEach(m => {
     const rel = m.relationship || m.role;
     relationshipMap.set(m.userId, rel === "Admin" || rel === "ADMIN" ? "Circle Creator" : rel);
   });
 
+  const memberIdList = Array.from(memberUserIds);
+  const memberUidList = Array.from(memberFirebaseUids);
+
   const memories = await prisma.memory.findMany({
     where: {
-      ownerId: { in: memberUserIds },
-      privacy: { in: ["Family", "Family Circle", "Family Only", "Public"] }
+      OR: [
+        { ownerId: { in: memberIdList } },
+        ...(memberUidList.length > 0 ? [{ ownerFirebaseUid: { in: memberUidList } }] : [])
+      ],
+      AND: [
+        {
+          OR: [
+            { privacy: { mode: "insensitive", contains: "family" } },
+            { privacy: { in: ["Family", "family", "Family Circle", "family circle", "Family Only", "family only", "Family-Only"] } }
+          ]
+        },
+        {
+          NOT: {
+            privacy: { mode: "insensitive", equals: "public" }
+          }
+        }
+      ]
     },
-    orderBy: { occurredAt: "desc" },
-    take: 100
+    orderBy: { occurredAt: "desc" }
   });
 
   const serialized = await Promise.all(
@@ -180,7 +222,6 @@ const getFamilySharedMemories = async ({ currentUser }) => {
     })
   );
 
-  // Deduplicate memories by id and title + date key
   const uniqueMap = new Map();
   for (const item of serialized) {
     if (!item) continue;
