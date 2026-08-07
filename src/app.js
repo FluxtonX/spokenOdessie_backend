@@ -2,6 +2,11 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 
+// Polyfill BigInt JSON serialization for Express responses
+BigInt.prototype.toJSON = function () {
+  return Number(this);
+};
+
 const authRoutes = require("./modules/auth/auth.routes");
 const albumRoutes = require("./modules/albums/album.routes");
 const memoryRoutes = require("./modules/memories/memory.routes");
