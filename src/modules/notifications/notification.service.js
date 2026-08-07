@@ -1,11 +1,18 @@
 const prisma = require("../../config/prisma");
 const { sendNotificationToUser } = require("../../socket");
+const { shouldCreateNotification, getUserNotificationPreferences } = require("../../services/notificationPreferences.service");
 
 /**
  * Create a notification for a user
  */
 async function createNotification({ userId, type, title, message, metadata, actionUrl }) {
   try {
+    const allowed = await shouldCreateNotification(userId, type, metadata);
+    if (!allowed) {
+      console.log(`Notification creation suppressed for user ${userId} due to preference settings: ${type}`);
+      return null;
+    }
+
     const notification = await prisma.notification.create({
       data: {
         userId,
@@ -36,6 +43,8 @@ async function createNotification({ userId, type, title, message, metadata, acti
  */
 async function getUserNotifications({ userId, unreadOnly = false, limit = 50 }) {
   try {
+    const prefs = await getUserNotificationPreferences(userId);
+
     const where = {
       userId,
       ...(unreadOnly ? { isRead: false } : {})
@@ -49,7 +58,17 @@ async function getUserNotifications({ userId, unreadOnly = false, limit = 50 }) 
       take: limit
     });
 
-    return notifications;
+    // Filter out notifications according to user's current active preference toggles
+    return notifications.filter((n) => {
+      const type = String(n.type || "").toUpperCase();
+      const meta = n.metadata || {};
+
+      if (type === "FOLLOW" && prefs.followerActivity === false) return false;
+      if ((type.startsWith("FAMILY") || meta.isFamilyActivity || meta.familyCircleId) && prefs.familyActivity === false) return false;
+      if ((type.startsWith("MEMORY") || type.startsWith("COMMENT") || type.includes("REACTION") || type.includes("LIKE")) && prefs.memoryInteractions === false) return false;
+      if (type.startsWith("SECURITY") && prefs.securityAlerts === false) return false;
+      return true;
+    });
   } catch (error) {
     console.error("Failed to get user notifications:", error);
     throw error;

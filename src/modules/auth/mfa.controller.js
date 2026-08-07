@@ -18,7 +18,7 @@ const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
 const crypto = require("crypto");
 const { registerUserSession } = require("../../services/session.service");
 
-function issueAuthToken(user, req) {
+async function issueAuthToken(user, req) {
   const sessionJti = crypto.randomUUID();
   const token = jwt.sign(
     { id: user.id, email: user.email, role: user.role || "USER", jti: sessionJti },
@@ -27,7 +27,11 @@ function issueAuthToken(user, req) {
   );
 
   if (req) {
-    registerUserSession({ userId: user.id, sessionJti, req }).catch(() => {});
+    try {
+      await registerUserSession({ userId: user.id, sessionJti, req });
+    } catch (err) {
+      console.warn("Failed to register user session:", err.message);
+    }
   }
 
   return token;
@@ -192,7 +196,7 @@ const verifyTotpLogin = async (req, res) => {
       data: { lastLogin: new Date() },
     });
 
-    const token = issueAuthToken(user, req);
+    const token = await issueAuthToken(user, req);
     await logSecurityEvent({ userId, action: "TOTP_VERIFY_SUCCESS", req });
 
     res.status(200).json({
@@ -237,7 +241,7 @@ const verifyRecoveryLogin = async (req, res) => {
       data: { lastLogin: new Date() },
     });
 
-    const token = issueAuthToken(user, req);
+    const token = await issueAuthToken(user, req);
     await logSecurityEvent({ userId, action: "RECOVERY_CODE_USED", req });
 
     res.status(200).json({
@@ -383,7 +387,7 @@ const passkeyLoginVerify = async (req, res) => {
     }
 
     const user = await verifyLoginAssertion(response, userId, req);
-    const token = issueAuthToken(user, req);
+    const token = await issueAuthToken(user, req);
 
     await logSecurityEvent({ userId: user.id, action: "PASSKEY_LOGIN_SUCCESS", req });
 

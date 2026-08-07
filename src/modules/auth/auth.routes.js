@@ -15,6 +15,8 @@ const {
   revokeSessionById,
   revokeAllOtherSessions,
   toggleLoginNotifications,
+  getNotificationPreferencesController,
+  updateNotificationPreferencesController,
 } = require("./auth.controller");
 const {
   setupTotp,
@@ -93,6 +95,8 @@ router.get("/sessions", protect, getActiveSessions);
 router.delete("/sessions/:id", protect, revokeSessionById);
 router.delete("/sessions", protect, revokeAllOtherSessions);
 router.put("/notifications/toggle", protect, toggleLoginNotifications);
+router.get("/notifications/preferences", protect, getNotificationPreferencesController);
+router.put("/notifications/preferences", protect, updateNotificationPreferencesController);
 
 module.exports = router;
 

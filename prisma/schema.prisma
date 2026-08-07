@@ -89,6 +89,7 @@ model User {
   sessions              UserSession[]
   passwordChangedAt     DateTime?
   loginNotifications    Boolean           @default(true)
+  notificationPreferences Json?           @default("{\"followerActivity\":true,\"familyActivity\":true,\"memoryInteractions\":true,\"securityAlerts\":true,\"loginNotifications\":true}")
 
   createdAt             DateTime          @default(now())
   updatedAt             DateTime          @updatedAt

@@ -19,7 +19,11 @@ async function issueAuthTokenWithSession(user, req) {
   );
 
   if (req) {
-    registerUserSession({ userId: user.id, sessionJti, req }).catch(() => {});
+    try {
+      await registerUserSession({ userId: user.id, sessionJti, req });
+    } catch (err) {
+      console.warn("Failed to register user session:", err.message);
+    }
   }
 
   return token;
@@ -732,12 +736,29 @@ const revokeAllOtherSessions = async (req, res) => {
 const toggleLoginNotifications = async (req, res) => {
   try {
     const { enabled } = req.body;
-    const updated = await prisma.user.update({
-      where: { id: req.user.id },
-      data: { loginNotifications: Boolean(enabled) },
-      select: { loginNotifications: true },
-    });
-    res.status(200).json({ success: true, loginNotifications: updated.loginNotifications });
+    const { updateUserNotificationPreferences } = require("../../services/notificationPreferences.service");
+    const prefs = await updateUserNotificationPreferences(req.user.id, { loginNotifications: Boolean(enabled) });
+    res.status(200).json({ success: true, loginNotifications: prefs.loginNotifications, preferences: prefs });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+const getNotificationPreferencesController = async (req, res) => {
+  try {
+    const { getUserNotificationPreferences } = require("../../services/notificationPreferences.service");
+    const preferences = await getUserNotificationPreferences(req.user.id);
+    res.status(200).json({ success: true, preferences });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+const updateNotificationPreferencesController = async (req, res) => {
+  try {
+    const { updateUserNotificationPreferences } = require("../../services/notificationPreferences.service");
+    const preferences = await updateUserNotificationPreferences(req.user.id, req.body);
+    res.status(200).json({ success: true, preferences });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -757,4 +778,6 @@ module.exports = {
   revokeSessionById,
   revokeAllOtherSessions,
   toggleLoginNotifications,
+  getNotificationPreferencesController,
+  updateNotificationPreferencesController,
 };
