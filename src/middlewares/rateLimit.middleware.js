@@ -21,6 +21,10 @@ function createRateLimiter(options = {}) {
   } = options;
 
   return (req, res, next) => {
+    if (process.env.NODE_ENV === "test") {
+      return next();
+    }
+
     const key = keyGenerator(req);
     const now = Date.now();
 

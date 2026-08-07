@@ -344,9 +344,88 @@ const sendNotificationEmail = async ({ toEmail, subject, title, message, actionU
   }
 };
 
+/**
+ * Send New Device Login Alert Email via Brevo SMTP
+ */
+const sendNewLoginNotificationEmail = async (email, { deviceName, ipAddress, time }) => {
+  const transporter = getTransporter();
+
+  console.log("\n==================================================");
+  console.log("📨 BREVO SMTP: NEW DEVICE SIGN-IN ALERT");
+  console.log("Recipient:", email);
+  console.log("Device:", deviceName);
+  console.log("IP Address:", ipAddress);
+  console.log("Time:", time);
+  console.log("==================================================\n");
+
+  const subject = "Security Alert: New sign-in to your Spoken Odyssey account";
+  const htmlContent = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>New Sign-In Alert - Spoken Odyssey</title>
+    </head>
+    <body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f5f9; margin: 0; padding: 40px 20px;">
+      <div style="max-width: 560px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 20px rgba(74, 58, 255, 0.08); border: 1px solid #e0e7ff;">
+        
+        <div style="background: linear-gradient(135deg, #4A3AFF 0%, #3b2dd1 100%); padding: 32px 24px; text-align: center;">
+          <h1 style="color: #ffffff; margin: 0; font-size: 26px; font-weight: 800;">Spoken Odyssey</h1>
+        </div>
+
+        <div style="padding: 32px 28px;">
+          <div style="background-color: #eef2ff; border-radius: 12px; padding: 16px; border-left: 4px solid #4A3AFF; margin-bottom: 24px;">
+            <h2 style="color: #1e1b4b; font-size: 18px; font-weight: 700; margin: 0 0 6px 0;">New Sign-In Detected</h2>
+            <p style="color: #4338ca; font-size: 14px; margin: 0;">We noticed a new device signed into your Spoken Odyssey account.</p>
+          </div>
+
+          <table style="width: 100%; border-collapse: collapse; margin-bottom: 24px;">
+            <tr>
+              <td style="padding: 10px 0; color: #6b7280; font-size: 14px; font-weight: 600;">Device / Browser:</td>
+              <td style="padding: 10px 0; color: #111827; font-size: 14px; font-weight: 700; text-align: right;">${deviceName}</td>
+            </tr>
+            <tr>
+              <td style="padding: 10px 0; color: #6b7280; font-size: 14px; font-weight: 600;">IP Address:</td>
+              <td style="padding: 10px 0; color: #111827; font-size: 14px; font-weight: 700; text-align: right;">${ipAddress || "Unknown"}</td>
+            </tr>
+            <tr>
+              <td style="padding: 10px 0; color: #6b7280; font-size: 14px; font-weight: 600;">Time:</td>
+              <td style="padding: 10px 0; color: #111827; font-size: 14px; font-weight: 700; text-align: right;">${time}</td>
+            </tr>
+          </table>
+
+          <p style="color: #4b5563; font-size: 14px; line-height: 1.6;">
+            If this was you, you can safely ignore this email. If you did not sign in from this device, please change your password immediately and revoke active sessions in your Security Settings.
+          </p>
+        </div>
+
+        <div style="background-color: #f8fafc; padding: 20px; text-align: center; border-top: 1px solid #f1f5f9;">
+          <p style="font-size: 12px; color: #9ca3af; margin: 0;">&copy; ${new Date().getFullYear()} Spoken Odyssey Security. All rights reserved.</p>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  if (transporter) {
+    try {
+      const info = await transporter.sendMail({
+        from: getFromHeader(),
+        to: email,
+        subject,
+        html: htmlContent,
+      });
+      return info;
+    } catch (err) {
+      console.error("❌ Failed to send New Login Notification Email via Brevo SMTP:", err.message);
+    }
+  }
+};
+
 module.exports = {
   sendPasswordResetEmail,
   sendVerificationEmail,
   sendFamilyInvitationEmail,
   sendNotificationEmail,
+  sendNewLoginNotificationEmail,
 };

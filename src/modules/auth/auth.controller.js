@@ -6,6 +6,24 @@ const {
   uploadFileToS3,
   getSignedFileUrl,
 } = require("../../services/s3.service");
+const crypto = require("crypto");
+const { getUserMfaState, generateMfaPendingToken } = require("../../services/mfa.service");
+const { registerUserSession, getUserSessions, revokeSession, revokeOtherSessions } = require("../../services/session.service");
+
+async function issueAuthTokenWithSession(user, req) {
+  const sessionJti = crypto.randomUUID();
+  const token = jwt.sign(
+    { id: user.id, email: user.email, role: user.role || "USER", jti: sessionJti },
+    JWT_SECRET,
+    { expiresIn: JWT_EXPIRES_IN }
+  );
+
+  if (req) {
+    registerUserSession({ userId: user.id, sessionJti, req }).catch(() => {});
+  }
+
+  return token;
+}
 
 const JWT_SECRET = process.env.JWT_SECRET || "spoken_odyssey_super_secret_key_12345";
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
@@ -117,16 +135,13 @@ const register = async (req, res) => {
       data: {
         email: emailLower,
         password: hashedPassword,
+        passwordChangedAt: new Date(),
         displayName: displayName || emailLower.split("@")[0],
       },
     });
 
-    // Generate JWT
-    const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRES_IN }
-    );
+    // Generate JWT with Session Tracking
+    const token = await issueAuthTokenWithSession(user, req);
 
     res.status(201).json({
       success: true,
@@ -182,18 +197,26 @@ const login = async (req, res) => {
       });
     }
 
+    // Check MFA configuration
+    const mfaState = await getUserMfaState(user.id);
+    if (mfaState && mfaState.mfaEnabled) {
+      const mfaToken = generateMfaPendingToken(user);
+      return res.status(200).json({
+        success: true,
+        mfaRequired: true,
+        availableMethods: mfaState.availableMethods,
+        mfaToken,
+      });
+    }
+
     // Update last login
     await prisma.user.update({
       where: { id: user.id },
       data: { lastLogin: new Date() },
     });
 
-    // Generate JWT
-    const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRES_IN }
-    );
+    // Issue JWT with Session Tracking
+    const token = await issueAuthTokenWithSession(user, req);
 
     res.status(200).json({
       success: true,
@@ -261,18 +284,26 @@ const googleLogin = async (req, res) => {
         data: {
           email: emailLower,
           googleId: googleId,
-          displayName: name,
-          photoURL: picture,
+          displayName: name || emailLower.split("@")[0],
+          photoURL: picture || null,
         },
       });
     }
 
-    // Generate JWT
-    const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRES_IN }
-    );
+    // Check MFA configuration
+    const mfaState = await getUserMfaState(user.id);
+    if (mfaState && mfaState.mfaEnabled) {
+      const mfaToken = generateMfaPendingToken(user);
+      return res.status(200).json({
+        success: true,
+        mfaRequired: true,
+        availableMethods: mfaState.availableMethods,
+        mfaToken,
+      });
+    }
+
+    // Issue JWT with Session Tracking
+    const token = await issueAuthTokenWithSession(user, req);
 
     res.status(200).json({
       success: true,
@@ -547,11 +578,12 @@ const resetPassword = async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(targetPassword, salt);
 
-    // Save updated password and clear reset token
+    // Save updated password, update passwordChangedAt, and clear reset token
     await prisma.user.update({
       where: { id: user.id },
       data: {
         password: hashedPassword,
+        passwordChangedAt: new Date(),
         passwordResetToken: null,
         passwordResetExpires: null,
       },
@@ -618,6 +650,7 @@ const changePassword = async (req, res) => {
       where: { id: userId },
       data: {
         password: hashedPassword,
+        passwordChangedAt: new Date(),
         passwordResetToken: null,
         passwordResetExpires: null,
       },
@@ -665,6 +698,51 @@ const sendVerification = async (req, res) => {
   }
 };
 
+/**
+ * Session & Notification Controllers
+ */
+const getActiveSessions = async (req, res) => {
+  try {
+    const sessions = await getUserSessions(req.user.id, req.user.sessionJti, req);
+    res.status(200).json({ success: true, sessions });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+const revokeSessionById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await revokeSession(req.user.id, id);
+    res.status(200).json({ success: true, message: "Session revoked successfully" });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+};
+
+const revokeAllOtherSessions = async (req, res) => {
+  try {
+    await revokeOtherSessions(req.user.id, req.user.sessionJti);
+    res.status(200).json({ success: true, message: "All other sessions revoked" });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+const toggleLoginNotifications = async (req, res) => {
+  try {
+    const { enabled } = req.body;
+    const updated = await prisma.user.update({
+      where: { id: req.user.id },
+      data: { loginNotifications: Boolean(enabled) },
+      select: { loginNotifications: true },
+    });
+    res.status(200).json({ success: true, loginNotifications: updated.loginNotifications });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 module.exports = {
   register,
   login,
@@ -675,4 +753,8 @@ module.exports = {
   resetPassword,
   changePassword,
   sendVerification,
+  getActiveSessions,
+  revokeSessionById,
+  revokeAllOtherSessions,
+  toggleLoginNotifications,
 };

@@ -79,11 +79,38 @@ model User {
   // Legacy Access Settings
   legacySettings        LegacySettings?
 
+  // MFA & Security Configuration
+  mfaEnabled            Boolean           @default(false)
+  mfaTypes              String[]          @default([])
+  totpSecret            MfaTotpSecret?
+  passkeys              Passkey[]
+  recoveryCodes         MfaRecoveryCode[]
+  auditLogs             SecurityAuditLog[]
+  sessions              UserSession[]
+  passwordChangedAt     DateTime?
+  loginNotifications    Boolean           @default(true)
+
   createdAt             DateTime          @default(now())
   updatedAt             DateTime          @updatedAt
 
   @@index([email])
   @@index([phoneNumber])
+}
+
+model UserSession {
+  id           String   @id @default(uuid())
+  userId       String
+  sessionToken String   @unique // Session JTI or token hash
+  deviceName   String   @default("Web Device")
+  deviceType   String   @default("desktop")
+  ipAddress    String?
+  userAgent    String?
+  lastActive   DateTime @default(now())
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 enum Role {
@@ -352,4 +379,67 @@ model LegacySettings {
   updatedAt           DateTime @updatedAt
 
   @@index([userId])
+}
+
+model MfaTotpSecret {
+  id          String   @id @default(uuid())
+  userId      String   @unique
+  secret      String
+  verified    Boolean  @default(false)
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model Passkey {
+  id           String   @id @default(uuid())
+  userId       String
+  credentialId String   @unique
+  publicKey    Bytes
+  counter      BigInt   @default(0)
+  transports   String[] @default([])
+  deviceName   String   @default("Passkey")
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt    DateTime @default(now())
+  lastUsedAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([credentialId])
+}
+
+model MfaRecoveryCode {
+  id        String    @id @default(uuid())
+  userId    String
+  codeHash  String
+  usedAt    DateTime?
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([codeHash])
+}
+
+model SecurityAuditLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  action    String
+  ipAddress String?
+  userAgent String?
+  metadata  Json?
+
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
 }
