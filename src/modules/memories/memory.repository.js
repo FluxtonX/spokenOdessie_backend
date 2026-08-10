@@ -1,19 +1,73 @@
 const prisma = require("../../config/prisma");
 
-const findByOwnerFirebaseUid = (ownerId) =>
-  prisma.memory.findMany({
-    where: { ownerId },
+const findByOwnerFirebaseUid = async (ownerId) => {
+  if (!ownerId) return [];
+
+  let user = null;
+  try {
+    user = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { id: ownerId },
+          { googleId: ownerId },
+          { email: ownerId }
+        ]
+      }
+    });
+  } catch (_) {}
+
+  const idsToMatch = Array.from(new Set([
+    ownerId,
+    user?.id,
+    user?.googleId,
+    user?.email
+  ])).filter(Boolean);
+
+  return prisma.memory.findMany({
+    where: {
+      OR: [
+        { ownerId: { in: idsToMatch } },
+        ...idsToMatch.map((id) => ({ taggedUserIds: { has: id } }))
+      ]
+    },
     orderBy: { updatedAt: "desc" },
   });
+};
 
-const findByOwnerAndPrivacy = (ownerId, allowedPrivacy) =>
-  prisma.memory.findMany({
+const findByOwnerAndPrivacy = async (ownerId, allowedPrivacy) => {
+  if (!ownerId) return [];
+
+  let user = null;
+  try {
+    user = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { id: ownerId },
+          { googleId: ownerId },
+          { email: ownerId }
+        ]
+      }
+    });
+  } catch (_) {}
+
+  const idsToMatch = Array.from(new Set([
+    ownerId,
+    user?.id,
+    user?.googleId,
+    user?.email
+  ])).filter(Boolean);
+
+  return prisma.memory.findMany({
     where: {
-      ownerId,
+      OR: [
+        { ownerId: { in: idsToMatch } },
+        ...idsToMatch.map((id) => ({ taggedUserIds: { has: id } }))
+      ],
       privacy: { in: allowedPrivacy },
     },
     orderBy: { updatedAt: "desc" },
   });
+};
 
 const findByIdAndOwnerFirebaseUid = (id, ownerId) =>
   prisma.memory.findFirst({
@@ -27,6 +81,7 @@ const create = (payload) =>
       title: payload.title,
       description: payload.description || "",
       tags: payload.tags || [],
+      taggedUserIds: payload.taggedUserIds || [],
       mood: payload.mood || "",
       privacy: payload.privacy || "Private",
       type: payload.type || "Text",

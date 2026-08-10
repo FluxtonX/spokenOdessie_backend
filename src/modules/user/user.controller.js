@@ -417,8 +417,29 @@ const markFamilySeen = async (req, res) => {
   }
 };
 
+const getTaggable = async (req, res) => {
+  try {
+    const users = await userService.getTaggableUsers({
+      currentUser: req.user,
+      query: req.query.q || req.query.query || "",
+    });
+
+    res.status(200).json({
+      success: true,
+      data: users,
+    });
+  } catch (error) {
+    console.error("Get Taggable Users Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to fetch taggable users",
+    });
+  }
+};
+
 module.exports = {
   getSuggested,
+  getTaggable,
   getFeatured,
   getFamily,
   connectFamily,

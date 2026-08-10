@@ -87,41 +87,41 @@ setInterval(cleanupRateLimitMap, 5 * 60 * 1000);
  * Pre-configured rate limiters for different use cases
  */
 const rateLimiters = {
-  // General API rate limiter (100 requests per 15 minutes)
+  // General API rate limiter (500 requests per 15 minutes)
   general: createRateLimiter({
+    windowMs: 15 * 60 * 1000,
+    maxRequests: 500
+  }),
+
+  // Strict rate limiter for sensitive operations (100 requests per 15 minutes)
+  strict: createRateLimiter({
     windowMs: 15 * 60 * 1000,
     maxRequests: 100
   }),
 
-  // Strict rate limiter for sensitive operations (10 requests per 15 minutes)
-  strict: createRateLimiter({
-    windowMs: 15 * 60 * 1000,
-    maxRequests: 10
-  }),
-
-  // Invitation rate limiter (5 invitations per hour per user)
+  // Invitation rate limiter (50 invitations per hour per user)
   invitation: createRateLimiter({
     windowMs: 60 * 60 * 1000,
-    maxRequests: 5,
+    maxRequests: 50,
     keyGenerator: (req) => {
       // Rate limit by user ID if authenticated, otherwise by IP
       return req.user?.id || req.ip || req.connection.remoteAddress;
     }
   }),
 
-  // SMS rate limiter (3 SMS per hour per user)
+  // SMS rate limiter (20 SMS per hour per user)
   sms: createRateLimiter({
     windowMs: 60 * 60 * 1000,
-    maxRequests: 3,
+    maxRequests: 20,
     keyGenerator: (req) => {
       return req.user?.id || req.ip || req.connection.remoteAddress;
     }
   }),
 
-  // Auth rate limiter (5 login attempts per 15 minutes)
+  // Auth rate limiter (50 login / MFA attempts per 15 minutes)
   auth: createRateLimiter({
     windowMs: 15 * 60 * 1000,
-    maxRequests: 5
+    maxRequests: 50
   })
 };
 

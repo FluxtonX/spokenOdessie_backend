@@ -19,6 +19,12 @@ const getMemories = async (req, res) => {
 
 const createMemory = async (req, res) => {
   try {
+    console.log("[CREATE MEMORY DEBUG] Request received from user:", req.user?.id, req.user?.email);
+    console.log("[CREATE MEMORY DEBUG] Body fields:", Object.keys(req.body));
+    console.log("[CREATE MEMORY DEBUG] title:", req.body.title, "| type:", req.body.type, "| status:", req.body.status, "| privacy:", req.body.privacy);
+    console.log("[CREATE MEMORY DEBUG] taggedUserIds:", req.body.taggedUserIds);
+    console.log("[CREATE MEMORY DEBUG] Files:", req.files?.length || 0, "files");
+    
     const memory = await memoryService.createMemory({
       user: req.user,
       title: req.body.title,
@@ -38,14 +44,18 @@ const createMemory = async (req, res) => {
       mediaMimeType: req.body.mediaMimeType,
       mediaOriginalName: req.body.mediaOriginalName,
       mediaList: req.body.mediaList,
+      taggedUserIds: req.body.taggedUserIds,
     });
+
+    console.log("[CREATE MEMORY DEBUG] ✅ Memory created successfully! ID:", memory.id, "Title:", memory.title);
 
     res.status(201).json({
       success: true,
       data: memory,
     });
   } catch (error) {
-    console.error("Create Memory Error:", error.message);
+    console.error("[CREATE MEMORY DEBUG] ❌ FAILED:", error.message);
+    console.error("[CREATE MEMORY DEBUG] Stack:", error.stack);
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || "Failed to save memory",
@@ -132,6 +142,7 @@ const updateMemory = async (req, res) => {
       mediaMimeType: req.body.mediaMimeType,
       mediaOriginalName: req.body.mediaOriginalName,
       mediaList: req.body.mediaList,
+      taggedUserIds: req.body.taggedUserIds,
     });
 
     res.status(200).json({

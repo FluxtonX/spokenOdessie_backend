@@ -16,6 +16,7 @@ const uploadRoutes = require("./modules/upload/upload.routes");
 const familyCircleRoutes = require("./modules/familyCircle/familyCircle.routes");
 const notificationRoutes = require("./modules/notifications/notification.routes");
 const legacyAccessRoutes = require("./modules/legacyAccess/legacyAccess.routes");
+const insightsRoutes = require("./modules/insights/insights.routes");
 
 const app = express();
 
@@ -72,6 +73,7 @@ app.use("/api/upload", uploadRoutes);
 app.use("/api/family-circle", familyCircleRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/legacy-access", legacyAccessRoutes);
+app.use("/api/insights", insightsRoutes);
 
 app.get("/health", (req, res) => {
   res.status(200).json({

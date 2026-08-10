@@ -47,9 +47,9 @@ const normalizeTags = (rawTags) => {
 };
 
 const normalizeStatus = (status) =>
-  typeof status === "string" && status.toLowerCase() === "published"
-    ? "published"
-    : "draft";
+  typeof status === "string" && status.toLowerCase() === "draft"
+    ? "draft"
+    : "published";
 
 const normalizeOccurredAt = (dateValue) => {
   if (!dateValue) {
@@ -149,7 +149,25 @@ const serializeMemory = async (memoryDoc, currentUser = null) => {
     console.warn("Failed to load reaction stats in serializeMemory:", err.message);
   }
 
-  const finalTotalReactions = totalDbReactions;
+  const finalTotalReactions = Math.max(totalDbReactions, typeof memory.likes === "number" ? memory.likes : 0);
+
+  let taggedUsers = [];
+  const taggedIds = Array.isArray(memory.taggedUserIds) ? memory.taggedUserIds : [];
+  if (taggedIds.length > 0) {
+    try {
+      const taggedDocs = await prisma.user.findMany({
+        where: { id: { in: taggedIds } },
+        select: { id: true, displayName: true, photoURL: true, photoKey: true, profession: true }
+      });
+      taggedUsers = await Promise.all(taggedDocs.map(async (u) => ({
+        id: u.id,
+        name: u.displayName || "Family Member",
+        displayName: u.displayName || "Family Member",
+        profession: u.profession || "",
+        avatar: u.photoKey ? await getSignedFileUrl(u.photoKey) : (u.photoURL || "")
+      })));
+    } catch (_) {}
+  }
 
   return {
     id: memory.id,
@@ -158,6 +176,8 @@ const serializeMemory = async (memoryDoc, currentUser = null) => {
     title: memory.title,
     description: memory.description || "",
     tags: Array.isArray(memory.tags) ? memory.tags : [],
+    taggedUserIds: taggedIds,
+    taggedUsers,
     mood: memory.mood || "",
     category: memory.privacy || "Private",
     privacy: memory.privacy || "Private",
@@ -201,13 +221,38 @@ const getMemoriesByUser = async (currentUser, targetUserId) => {
 
   const memories = await memoryRepository.findByOwnerFirebaseUid(targetUid);
 
-  // Filter out Private memories if requester is not the owner
-  const isOwner = currentUserId && (currentUserId === targetUid);
+  let isOwner = false;
+  let targetUserIds = [targetUid];
+
+  if (currentUserId) {
+    if (currentUserId === targetUid) {
+      isOwner = true;
+    } else {
+      try {
+        const u = await prisma.user.findFirst({
+          where: {
+            OR: [
+              { id: targetUid },
+              { googleId: targetUid },
+              { email: targetUid }
+            ]
+          }
+        });
+        if (u) {
+          targetUserIds = Array.from(new Set([u.id, u.googleId, u.email])).filter(Boolean);
+          isOwner = targetUserIds.includes(currentUserId);
+        }
+      } catch (_) {}
+    }
+  }
+
   const filteredMemories = isOwner
     ? memories
     : memories.filter(m => {
         const p = String(m.privacy || "Public").toLowerCase();
-        return p !== "private";
+        const tagged = Array.isArray(m.taggedUserIds) ? m.taggedUserIds : [];
+        const isTagged = currentUserId && (tagged.includes(currentUserId) || tagged.some(id => targetUserIds.includes(id)));
+        return p !== "private" || isTagged;
       });
 
   return Promise.all(filteredMemories.map((memory) => serializeMemory(memory, currentUser)));
@@ -316,11 +361,20 @@ const createMemory = async ({
   mediaMimeType,
   mediaOriginalName,
   mediaList,
+  taggedUserIds,
 }) => {
   const normalizedTitle = typeof title === "string" ? title.trim() : "";
   const normalizedDescription = typeof description === "string" ? description.trim() : "";
   const normalizedStatus = normalizeStatus(status);
   const normalizedTags = normalizeTags(tags);
+
+  let normalizedTaggedUserIds = [];
+  if (taggedUserIds) {
+    try {
+      const parsed = typeof taggedUserIds === "string" ? JSON.parse(taggedUserIds) : taggedUserIds;
+      if (Array.isArray(parsed)) normalizedTaggedUserIds = parsed.map(String).filter(Boolean);
+    } catch (_) {}
+  }
 
   if (!normalizedTitle) {
     const error = new Error("Memory title is required.");
@@ -330,13 +384,14 @@ const createMemory = async ({
 
   let album = null;
   if (albumId) {
-    album = await prisma.album.findFirst({
-      where: { id: albumId, ownerId: user.id }
-    });
+    try {
+      album = await prisma.album.findFirst({
+        where: { id: albumId, ownerId: user.id }
+      });
+    } catch (_) {}
     if (!album) {
-      const error = new Error("Selected album could not be found.");
-      error.statusCode = 404;
-      throw error;
+      console.warn(`Album ${albumId} not found in DB for user ${user.id}, saving memory with albumId = null`);
+      album = null;
     }
   }
 
@@ -398,6 +453,7 @@ const createMemory = async ({
     title: normalizedTitle,
     description: normalizedDescription,
     tags: finalTags,
+    taggedUserIds: normalizedTaggedUserIds,
     mood: typeof mood === "string" ? mood.trim() : "",
     privacy: typeof privacy === "string" ? privacy.trim() || "Private" : "Private",
     type: typeof type === "string" ? type.trim() || "Text" : "Text",
@@ -776,9 +832,31 @@ const interactWithMemory = async ({ user, memoryId, type }) => {
 };
 
 const getMemoryDetails = async ({ currentUser, memoryId }) => {
-  const memory = await prisma.memory.findUnique({
-    where: { id: memoryId }
-  });
+  let memory = null;
+  
+  if (memoryId) {
+    try {
+      memory = await prisma.memory.findUnique({
+        where: { id: memoryId }
+      });
+    } catch (_) {}
+  }
+
+  if (!memory && memoryId) {
+    try {
+      const decoded = decodeURIComponent(memoryId);
+      memory = await prisma.memory.findFirst({
+        where: {
+          OR: [
+            { id: memoryId },
+            { title: { mode: "insensitive", equals: decoded } },
+            { title: { mode: "insensitive", equals: decoded.replace(/-/g, " ") } }
+          ]
+        }
+      });
+    } catch (_) {}
+  }
+
   if (!memory) {
     const error = new Error("Memory could not be found.");
     error.statusCode = 404;
@@ -787,11 +865,18 @@ const getMemoryDetails = async ({ currentUser, memoryId }) => {
 
   const currentUserId = currentUser?.id || currentUser?.uid || currentUser?.sub;
 
+  // Always allow owner
   if (currentUserId && memory.ownerId === currentUserId) {
     return serializeMemory(memory, currentUser);
   }
 
-  // Only block explicitly archived memories for non-owners
+  // Always allow tagged users
+  const taggedIds = Array.isArray(memory.taggedUserIds) ? memory.taggedUserIds : [];
+  if (currentUserId && taggedIds.includes(currentUserId)) {
+    return serializeMemory(memory, currentUser);
+  }
+
+  // Block explicitly archived memories for non-owners
   if (memory.status === "archived") {
     const error = new Error("This memory is archived.");
     error.statusCode = 403;
@@ -800,29 +885,13 @@ const getMemoryDetails = async ({ currentUser, memoryId }) => {
 
   const privacyStr = String(memory.privacy || "Public").toLowerCase();
 
-  if (privacyStr === "public" || privacyStr === "everyone") {
-    return serializeMemory(memory, currentUser);
+  if (privacyStr === "private" && currentUserId !== memory.ownerId && !taggedIds.includes(currentUserId)) {
+    const error = new Error("Access denied: this memory is private.");
+    error.statusCode = 403;
+    throw error;
   }
 
-  if (privacyStr === "family" || privacyStr === "family circle") {
-    let isFamily = false;
-    if (currentUserId) {
-      try {
-        const [u1, u2] = [currentUserId, memory.ownerId].sort();
-        const familyConnection = await prisma.familyConnection.findUnique({
-          where: { user1Id_user2Id: { user1Id: u1, user2Id: u2 } }
-        });
-        isFamily = !!familyConnection;
-      } catch (_) {}
-    }
-    
-    // For public profile/discovery views, allow family memories to be viewable in modal
-    return serializeMemory(memory, currentUser);
-  }
-
-  const error = new Error("Access denied: this memory is private.");
-  error.statusCode = 403;
-  throw error;
+  return serializeMemory(memory, currentUser);
 };
 
 const VALID_REACTION_TYPES = ["heart", "like", "care", "haha", "wow", "angry"];

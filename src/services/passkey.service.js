@@ -10,18 +10,37 @@ const prisma = require("../config/prisma");
 const challengeStore = new Map();
 
 function getRpConfig(req) {
-  const host = req?.headers?.host?.split(":")[0] || "localhost";
+  const rawHost = req?.headers?.["x-forwarded-host"] || req?.headers?.host || "localhost:3000";
+  const host = rawHost.split(":")[0] || "localhost";
+  
+  // RP_ID must be a domain name without protocol/port (or 'localhost')
   const rpID = process.env.RP_ID || (host === "localhost" || host === "127.0.0.1" ? "localhost" : host);
   
   const protocol = req?.headers?.["x-forwarded-proto"] || req?.protocol || "http";
   const originHeader = req?.headers?.origin;
-  
-  const expectedOrigin = process.env.EXPECTED_ORIGIN || originHeader || `${protocol}://${req?.headers?.host || "localhost:3000"}`;
+  const refererHeader = req?.headers?.referer ? (function() { try { return new URL(req.headers.referer).origin; } catch(_) { return null; } })() : null;
+  const defaultClientOrigin = `${protocol}://${rawHost}`;
+
+  const envOrigins = (process.env.EXPECTED_ORIGIN || "")
+    .split(",")
+    .map(o => o.trim())
+    .filter(Boolean);
+
+  const allowedOrigins = Array.from(new Set([
+    ...envOrigins,
+    originHeader,
+    refererHeader,
+    defaultClientOrigin,
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://spokenodyssey.com",
+    "https://www.spokenodyssey.com"
+  ])).filter(Boolean);
 
   return {
     rpName: process.env.RP_NAME || "Spoken Odyssey",
     rpID,
-    expectedOrigin,
+    expectedOrigin: allowedOrigins,
   };
 }
 
@@ -35,8 +54,12 @@ function storeChallenge(key, challenge) {
 function getAndClearChallenge(key) {
   const entry = challengeStore.get(key);
   if (!entry) return null;
-  challengeStore.delete(key);
-  if (Date.now() > entry.expiresAt) return null;
+  if (Date.now() > entry.expiresAt) {
+    challengeStore.delete(key);
+    return null;
+  }
+  // Schedule deletion after 30-second grace period to handle mobile double-requests/preflights
+  setTimeout(() => challengeStore.delete(key), 30000);
   return entry.challenge;
 }
 
@@ -60,7 +83,7 @@ async function getRegistrationOptions(user, req) {
     attestationType: "none",
     excludeCredentials: existingPasskeys.map((p) => ({
       id: p.credentialId,
-      transports: p.transports || [],
+      transports: Array.isArray(p.transports) && p.transports.length > 0 ? p.transports : undefined,
     })),
     authenticatorSelection: {
       residentKey: "preferred",
@@ -96,11 +119,10 @@ async function verifyAndSaveRegistration(user, body, deviceName = "Passkey Devic
 
   const { credential } = verification.registrationInfo;
 
-  // Handle simplewebauthn credential output structure
   const credentialId = credential.id || body.id;
   const publicKey = Buffer.from(credential.publicKey || credential.credentialPublicKey);
   const counter = BigInt(credential.counter || 0);
-  const transports = body.response?.transports || [];
+  const transports = body.response?.transports || ["internal", "hybrid"];
 
   const newPasskey = await prisma.passkey.create({
     data: {
@@ -130,7 +152,7 @@ async function getLoginOptions(userId = null, req) {
     });
     allowCredentials = userPasskeys.map((p) => ({
       id: p.credentialId,
-      transports: p.transports || [],
+      transports: Array.isArray(p.transports) && p.transports.length > 0 ? p.transports : undefined,
     }));
   }
 

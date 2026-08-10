@@ -1285,8 +1285,89 @@ const markFamilySeen = async ({ currentUser }) => {
   return { success: true };
 };
 
+const getTaggableUsers = async ({ currentUser, query = "" }) => {
+  if (!currentUser?.id) return [];
+  const currentUserId = currentUser.id;
+
+  try {
+    // 1. Fetch Family Connections
+    const familyConnections = await prisma.familyConnection.findMany({
+      where: {
+        OR: [{ user1Id: currentUserId }, { user2Id: currentUserId }]
+      }
+    });
+    const familyUids = new Set(
+      familyConnections.map((c) => (c.user1Id === currentUserId ? c.user2Id : c.user1Id))
+    );
+
+    // 2. Fetch Following Users
+    const followings = await prisma.follow.findMany({
+      where: { followerId: currentUserId },
+      select: { followingId: true }
+    });
+    const followingUids = new Set(followings.map((f) => f.followingId));
+
+    // 3. Fetch Followers Users
+    const followers = await prisma.follow.findMany({
+      where: { followingId: currentUserId },
+      select: { followerId: true }
+    });
+    const followerUids = new Set(followers.map((f) => f.followerId));
+
+    const cleanQ = query.trim();
+    const whereClause = {
+      id: { not: currentUserId },
+      ...(cleanQ
+        ? {
+            OR: [
+              { displayName: { contains: cleanQ, mode: "insensitive" } },
+              { email: { contains: cleanQ, mode: "insensitive" } },
+              { profession: { contains: cleanQ, mode: "insensitive" } },
+            ]
+          }
+        : {})
+    };
+
+    const users = await prisma.user.findMany({
+      where: whereClause,
+      take: 50,
+      orderBy: { updatedAt: "desc" }
+    });
+
+    return Promise.all(
+      users.map(async (u) => {
+        const serialized = await serializeUser(u);
+        let relation = "Connection";
+        if (familyUids.has(u.id)) {
+          relation = "Family Circle";
+        } else if (followingUids.has(u.id) && followerUids.has(u.id)) {
+          relation = "Mutual Connection";
+        } else if (followingUids.has(u.id)) {
+          relation = "Following";
+        } else if (followerUids.has(u.id)) {
+          relation = "Follower";
+        }
+
+        return {
+          ...serialized,
+          id: u.id,
+          name: u.displayName || u.email?.split("@")[0] || "User",
+          displayName: u.displayName || u.email?.split("@")[0] || "User",
+          profession: u.profession || relation,
+          relation: relation,
+          avatar: serialized.avatarUrl || serialized.photoURL || ""
+        };
+      })
+    );
+  } catch (err) {
+    console.error("Error in getTaggableUsers:", err);
+    return [];
+  }
+};
+
 module.exports = {
   getSuggestedPeople,
+  getTaggableUsers,
   getFeaturedPeople,
   getFamilyMembers,
   sendFamilyInvitation,

@@ -242,6 +242,7 @@ model Memory {
   title             String
   description       String         @default("")
   tags              String[]       @default([])
+  taggedUserIds     String[]       @default([])
   mood              String         @default("")
   privacy           String         @default("Private")
   type              String         @default("Text")
