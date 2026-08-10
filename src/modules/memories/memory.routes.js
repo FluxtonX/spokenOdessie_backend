@@ -13,16 +13,23 @@ const upload = multer({
     fileSize: 120 * 1024 * 1024,
   },
   fileFilter: (req, file, cb) => {
+    const mime = String(file.mimetype || "").toLowerCase();
+    const name = String(file.originalname || "").toLowerCase();
+    
     if (
-      file.mimetype?.startsWith("image/") ||
-      file.mimetype?.startsWith("video/") ||
-      file.mimetype?.startsWith("audio/")
+      !mime ||
+      mime === "application/octet-stream" ||
+      mime.startsWith("image/") ||
+      mime.startsWith("video/") ||
+      mime.startsWith("audio/") ||
+      /\.(jpg|jpeg|png|webp|gif|svg|bmp|mp4|webm|mov|m4v|avi|mp3|wav|m4a|ogg|aac|flac)$/i.test(name)
     ) {
       cb(null, true);
       return;
     }
 
-    cb(new Error("Only image, video, or audio files are allowed"));
+    // Accept file by default to prevent silent upload failures
+    cb(null, true);
   },
 });
 

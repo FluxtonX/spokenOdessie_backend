@@ -6,6 +6,7 @@ const controller = require("./user.controller");
 const router = express.Router();
 
 router.get("/discovery", protect, controller.getSuggested);
+router.get("/taggable", protect, controller.getTaggable);
 router.get("/featured", optionalProtect, controller.getFeatured);
 router.get("/family", protect, controller.getFamily);
 router.post("/family", protect, rateLimiters.invitation, controller.connectFamily);
