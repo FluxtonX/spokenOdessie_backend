@@ -75,6 +75,7 @@ model User {
 
   // Notifications
   notifications         Notification[]
+  deviceTokens          DeviceToken[]
 
   // Legacy Access Settings
   legacySettings        LegacySettings?
@@ -359,6 +360,18 @@ model Notification {
   @@index([isRead])
   @@index([type])
   @@index([createdAt])
+}
+
+model DeviceToken {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token      String   @unique
+  deviceType String   @default("web")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([userId])
 }
 
 model LegacySettings {
