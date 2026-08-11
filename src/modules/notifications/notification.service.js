@@ -1,6 +1,7 @@
 const prisma = require("../../config/prisma");
 const { sendNotificationToUser } = require("../../socket");
 const { shouldCreateNotification, getUserNotificationPreferences } = require("../../services/notificationPreferences.service");
+const { sendWebPushNotification } = require("../../services/pushNotification.service");
 
 /**
  * Create a notification for a user
@@ -30,6 +31,17 @@ async function createNotification({ userId, type, title, message, metadata, acti
     } catch (wsErr) {
       console.warn("Could not push socket notification:", wsErr.message);
     }
+
+    // Asynchronously dispatch real-time Web Push notification to user devices
+    try {
+      sendWebPushNotification({
+        userId,
+        title,
+        body: message,
+        actionUrl,
+        metadata,
+      }).catch((pErr) => console.warn("Background Web Push dispatch warning:", pErr.message));
+    } catch (_) {}
 
     return notification;
   } catch (error) {
