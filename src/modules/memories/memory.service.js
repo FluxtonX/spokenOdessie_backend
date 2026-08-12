@@ -156,16 +156,42 @@ const serializeMemory = async (memoryDoc, currentUser = null) => {
   if (taggedIds.length > 0) {
     try {
       const taggedDocs = await prisma.user.findMany({
-        where: { id: { in: taggedIds } },
-        select: { id: true, displayName: true, photoURL: true, photoKey: true, profession: true }
+        where: {
+          OR: [
+            { id: { in: taggedIds } },
+            { googleId: { in: taggedIds } },
+            { email: { in: taggedIds } }
+          ]
+        },
+        select: { id: true, googleId: true, email: true, displayName: true, photoURL: true, photoKey: true, profession: true }
       });
-      taggedUsers = await Promise.all(taggedDocs.map(async (u) => ({
-        id: u.id,
-        name: u.displayName || "Family Member",
-        displayName: u.displayName || "Family Member",
-        profession: u.profession || "",
-        avatar: u.photoKey ? await getSignedFileUrl(u.photoKey) : (u.photoURL || "")
-      })));
+
+      const docsMap = new Map();
+      taggedDocs.forEach(doc => {
+        if (doc.id) docsMap.set(doc.id, doc);
+        if (doc.googleId) docsMap.set(doc.googleId, doc);
+        if (doc.email) docsMap.set(doc.email.toLowerCase(), doc);
+      });
+
+      taggedUsers = await Promise.all(taggedIds.map(async (tid) => {
+        const u = docsMap.get(tid) || docsMap.get(String(tid).toLowerCase());
+        if (u) {
+          return {
+            id: u.id || tid,
+            name: u.displayName || "Family Member",
+            displayName: u.displayName || "Family Member",
+            profession: u.profession || "",
+            avatar: u.photoKey ? await getSignedFileUrl(u.photoKey) : (u.photoURL || "")
+          };
+        }
+        return {
+          id: String(tid),
+          name: "Family Member",
+          displayName: "Family Member",
+          profession: "",
+          avatar: ""
+        };
+      }));
     } catch (_) {}
   }
 
@@ -481,50 +507,75 @@ const createMemory = async ({
   }
 
   if (normalizedStatus === "published") {
-    // Notify followers and family members in real-time
+    // Notify followers, family members, and tagged users in real-time
     try {
       const { createNotification } = require("../notifications/notification.service");
       const authorName = getOwnerDisplayName(userDoc || user);
       const privacyType = String(privacy || "Private").toLowerCase();
 
+      // 1. Dispatch real-time notifications to all Tagged Members
+      if (normalizedTaggedUserIds && normalizedTaggedUserIds.length > 0) {
+        try {
+          const taggedDocs = await prisma.user.findMany({
+            where: {
+              OR: [
+                { id: { in: normalizedTaggedUserIds } },
+                { googleId: { in: normalizedTaggedUserIds } },
+                { email: { in: normalizedTaggedUserIds } }
+              ]
+            },
+            select: { id: true, displayName: true, email: true }
+          });
+
+          // Send notification to each tagged user
+          for (const taggedUser of taggedDocs) {
+            if (taggedUser.id && taggedUser.id !== user.id) {
+              createNotification({
+                userId: taggedUser.id,
+                type: "MEMORY_TAGGED",
+                title: "Tagged in Story",
+                message: `${authorName} tagged you in a memory: "${normalizedTitle}"`,
+                metadata: {
+                  memoryId: memory.id,
+                  authorId: user.id,
+                  authorName,
+                  memoryTitle: normalizedTitle,
+                  type: "MEMORY_TAGGED"
+                },
+                actionUrl: `/memories?memoryId=${memory.id}`
+              }).catch(err => console.warn("Failed to dispatch tagged user notification:", taggedUser.id, err.message));
+            }
+          }
+        } catch (tagErr) {
+          console.warn("Failed to process tagged member notifications:", tagErr.message);
+        }
+      }
+
       let targetUserIds = [];
 
       if (privacyType === "public") {
-        // Fetch all followers of the creator
-        const followers = await prisma.follow.findMany({
-          where: {
-            OR: [
-              { followingId: user.id },
-              ...(user.googleId ? [{ followingId: user.googleId }] : []),
-              ...(user.email ? [{ followingId: user.email.toLowerCase() }] : [])
-            ]
-          },
-          select: { followerId: true }
-        });
-        targetUserIds = followers.map(f => f.followerId).filter(id => id && id !== user.id);
+        // Fetch all followers and mutual connections of the creator
+        const { getConnectedUserIds } = require("../notifications/notification.service");
+        const connected = await getConnectedUserIds(user.id);
+        targetUserIds = connected;
       } else if (privacyType === "family circle" || privacyType === "family") {
-        // Fetch all connected family members
-        const connections = await prisma.familyConnection.findMany({
-          where: {
-            OR: [
-              { user1Id: user.id },
-              { user2Id: user.id }
-            ]
-          }
-        });
-        targetUserIds = connections.map(c => c.user1Id === user.id ? c.user2Id : c.user1Id).filter(id => id && id !== user.id);
+        // Fetch all connected family members & family circle members
+        const { getConnectedUserIds } = require("../notifications/notification.service");
+        const connected = await getConnectedUserIds(user.id);
+        targetUserIds = connected;
       }
 
-      // De-duplicate target IDs
-      targetUserIds = Array.from(new Set(targetUserIds));
+      // Exclude already tagged users and author from general broadcast to avoid duplicate notifications
+      const taggedIdSet = new Set(normalizedTaggedUserIds);
+      targetUserIds = Array.from(new Set(targetUserIds)).filter(id => !taggedIdSet.has(id) && id !== user.id);
 
-      // Asynchronously dispatch notifications for all followers / family members
+      // Asynchronously dispatch notifications for all mutual connections / followers / family
       for (const targetId of targetUserIds) {
         createNotification({
           userId: targetId,
           type: privacyType.includes("family") ? "FAMILY_MEMORY_SHARED" : "MEMORY_SHARED",
-          title: "New Story Posted",
-          message: `${authorName} posted a new story: "${normalizedTitle}". Click to view.`,
+          title: privacyType.includes("family") ? "Family Story Shared" : "New Story Posted",
+          message: `${authorName} shared a new story: "${normalizedTitle}"`,
           metadata: {
             memoryId: memory.id,
             authorId: user.id,
@@ -564,6 +615,7 @@ const updateMemory = async ({
   mediaMimeType,
   mediaOriginalName,
   mediaList,
+  taggedUserIds,
 }) => {
   let memory = await memoryRepository.findByIdAndOwnerFirebaseUid(
     memoryId,
@@ -623,6 +675,14 @@ const updateMemory = async ({
   }
   const finalTags = Array.from(new Set([...parsedTags, ...autoTags]));
 
+  let normalizedTaggedUserIds = undefined;
+  if (taggedUserIds !== undefined) {
+    try {
+      const parsed = typeof taggedUserIds === "string" ? JSON.parse(taggedUserIds) : taggedUserIds;
+      if (Array.isArray(parsed)) normalizedTaggedUserIds = parsed.map(String).filter(Boolean);
+    } catch (_) {}
+  }
+
   const payload = {
     title: normalizedTitle,
     description: normalizedDescription,
@@ -634,6 +694,10 @@ const updateMemory = async ({
     backgroundId: typeof backgroundId === "string" ? backgroundId.trim() : memory.backgroundId || "none",
     fontId: typeof fontId === "string" ? fontId.trim() : memory.fontId || "default",
   };
+
+  if (normalizedTaggedUserIds !== undefined) {
+    payload.taggedUserIds = normalizedTaggedUserIds;
+  }
 
   if (album) {
     payload.albumId = album.id;
@@ -683,6 +747,52 @@ const updateMemory = async ({
     user.id,
     payload
   );
+
+  // If new tagged users were added, notify them
+  if (normalizedTaggedUserIds && normalizedTaggedUserIds.length > 0) {
+    try {
+      const prevTaggedIds = new Set(Array.isArray(memory.taggedUserIds) ? memory.taggedUserIds : []);
+      const newlyTaggedIds = normalizedTaggedUserIds.filter(id => !prevTaggedIds.has(id));
+
+      if (newlyTaggedIds.length > 0) {
+        const { createNotification } = require("../notifications/notification.service");
+        const userDoc = await prisma.user.findUnique({ where: { id: user.id } });
+        const authorName = getOwnerDisplayName(userDoc || user);
+
+        const newTaggedDocs = await prisma.user.findMany({
+          where: {
+            OR: [
+              { id: { in: newlyTaggedIds } },
+              { googleId: { in: newlyTaggedIds } },
+              { email: { in: newlyTaggedIds } }
+            ]
+          },
+          select: { id: true, displayName: true, email: true }
+        });
+
+        for (const taggedUser of newTaggedDocs) {
+          if (taggedUser.id && taggedUser.id !== user.id) {
+            createNotification({
+              userId: taggedUser.id,
+              type: "MEMORY_TAGGED",
+              title: "Tagged in Story",
+              message: `${authorName} tagged you in a memory: "${normalizedTitle}"`,
+              metadata: {
+                memoryId: memory.id,
+                authorId: user.id,
+                authorName,
+                memoryTitle: normalizedTitle,
+                type: "MEMORY_TAGGED"
+              },
+              actionUrl: `/memories?memoryId=${memory.id}`
+            }).catch(err => console.warn("Failed to dispatch update tagged notification:", taggedUser.id, err.message));
+          }
+        }
+      }
+    } catch (tagErr) {
+      console.warn("Failed to process newly tagged notifications on update:", tagErr.message);
+    }
+  }
 
   return serializeMemory(updatedMemory, user);
 };
@@ -995,28 +1105,51 @@ const reactToMemory = async ({ user, memoryId, type }) => {
       await interactWithMemory({ user, memoryId, type: "like" });
     } catch (_) {}
 
-    // Create real-time MEMORY_LIKE notification for memory owner if reactor is not owner
+    // Create real-time MEMORY_LIKE notification for memory owner and tagged members
     try {
       const memory = await prisma.memory.findUnique({
         where: { id: memoryId },
-        select: { ownerId: true, title: true }
+        select: { ownerId: true, title: true, taggedUserIds: true }
       });
-      if (memory && memory.ownerId && memory.ownerId !== userId) {
+      if (memory) {
         const { createNotification } = require("../notifications/notification.service");
         const senderName = user.displayName || user.name || (user.email ? user.email.split("@")[0] : "Someone");
         const reactionEmoji = result.userReaction === "heart" ? "❤️" : "👍";
-        await createNotification({
-          userId: memory.ownerId,
-          type: "MEMORY_LIKE",
-          title: "New Reaction",
-          message: `${senderName} reacted ${reactionEmoji} to your story "${memory.title || "Untitled"}"`,
-          metadata: {
-            memoryId,
-            reactorId: userId,
-            reactionType: result.userReaction
-          },
-          actionUrl: `/memories?memoryId=${memoryId}`
-        });
+
+        // Notify memory owner
+        if (memory.ownerId && memory.ownerId !== userId) {
+          await createNotification({
+            userId: memory.ownerId,
+            type: "MEMORY_LIKE",
+            title: "New Reaction",
+            message: `${senderName} reacted ${reactionEmoji} to your story "${memory.title || "Untitled"}"`,
+            metadata: {
+              memoryId,
+              reactorId: userId,
+              reactionType: result.userReaction
+            },
+            actionUrl: `/memories?memoryId=${memoryId}`
+          });
+        }
+
+        // Notify tagged members on this memory
+        if (Array.isArray(memory.taggedUserIds) && memory.taggedUserIds.length > 0) {
+          const taggedIdsToNotify = memory.taggedUserIds.filter(id => id && id !== userId && id !== memory.ownerId);
+          for (const tid of taggedIdsToNotify) {
+            createNotification({
+              userId: tid,
+              type: "MEMORY_LIKE",
+              title: "New Reaction",
+              message: `${senderName} reacted ${reactionEmoji} to "${memory.title || "Story"}" that you're tagged in`,
+              metadata: {
+                memoryId,
+                reactorId: userId,
+                reactionType: result.userReaction
+              },
+              actionUrl: `/memories?memoryId=${memoryId}`
+            }).catch(err => console.warn("Failed to notify tagged user on reaction:", tid, err.message));
+          }
+        }
       }
     } catch (notifErr) {
       console.warn("Failed to create memory reaction notification:", notifErr.message);
@@ -1052,14 +1185,16 @@ const shareMemory = async ({ user, memoryId }) => {
     data: { shares: { increment: 1 } }
   });
 
-  if (user && updatedMemory.ownerId && updatedMemory.ownerId !== user.id) {
-    try {
-      const { createNotification } = require("../notifications/notification.service");
-      const senderName = user.displayName || user.name || (user.email ? user.email.split("@")[0] : "Someone");
+  try {
+    const { createNotification, getConnectedUserIds } = require("../notifications/notification.service");
+    const senderName = user.displayName || user.name || (user.email ? user.email.split("@")[0] : "Someone");
+
+    // 1. Notify memory owner if sharer is not the owner
+    if (user && updatedMemory.ownerId && updatedMemory.ownerId !== user.id) {
       await createNotification({
         userId: updatedMemory.ownerId,
         type: "MEMORY_SHARED",
-        title: "Memory Shared",
+        title: "Story Shared",
         message: `${senderName} shared your story "${updatedMemory.title || "Untitled"}"`,
         metadata: {
           memoryId,
@@ -1067,9 +1202,28 @@ const shareMemory = async ({ user, memoryId }) => {
         },
         actionUrl: `/memories?memoryId=${memoryId}`
       });
-    } catch (notifErr) {
-      console.warn("Failed to create memory share notification:", notifErr.message);
     }
+
+    // 2. Notify mutual friends / connections about the shared story
+    if (user) {
+      const connectedIds = await getConnectedUserIds(user.id);
+      const targetIds = connectedIds.filter(id => id !== user.id && id !== updatedMemory.ownerId);
+      for (const cid of targetIds) {
+        createNotification({
+          userId: cid,
+          type: "MEMORY_SHARED",
+          title: "Story Shared by Connection",
+          message: `${senderName} shared the story "${updatedMemory.title || "Story"}"`,
+          metadata: {
+            memoryId,
+            sharerId: user.id
+          },
+          actionUrl: `/memories?memoryId=${memoryId}`
+        }).catch(err => console.warn("Failed to notify connection on share:", cid, err.message));
+      }
+    }
+  } catch (notifErr) {
+    console.warn("Failed to create memory share notification:", notifErr.message);
   }
 
   return {

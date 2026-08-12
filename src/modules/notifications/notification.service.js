@@ -165,11 +165,70 @@ async function getUnreadCount({ userId }) {
   }
 }
 
+/**
+ * Get all mutual friend, follower, and family connection user IDs for a user
+ */
+async function getConnectedUserIds(userId) {
+  if (!userId) return [];
+  try {
+    // 1. Family connections
+    const familyConnections = await prisma.familyConnection.findMany({
+      where: {
+        OR: [{ user1Id: userId }, { user2Id: userId }]
+      },
+      select: { user1Id: true, user2Id: true }
+    });
+    const familyIds = familyConnections.map(c => c.user1Id === userId ? c.user2Id : c.user1Id);
+
+    // 2. Family circle members
+    const familyMemberships = await prisma.familyMember.findMany({
+      where: { userId },
+      select: { familyCircleId: true }
+    });
+    const circleIds = familyMemberships.map(m => m.familyCircleId);
+    let circleMemberIds = [];
+    if (circleIds.length > 0) {
+      const circleMembers = await prisma.familyMember.findMany({
+        where: { familyCircleId: { in: circleIds } },
+        select: { userId: true }
+      });
+      circleMemberIds = circleMembers.map(m => m.userId);
+    }
+
+    // 3. Following and Followers
+    const myFollowings = await prisma.follow.findMany({
+      where: { followerId: userId },
+      select: { followingId: true }
+    });
+    const followingIds = myFollowings.map(f => f.followingId);
+
+    const myFollowers = await prisma.follow.findMany({
+      where: { followingId: userId },
+      select: { followerId: true }
+    });
+    const followerIds = myFollowers.map(f => f.followerId);
+
+    const all = new Set([
+      ...familyIds,
+      ...circleMemberIds,
+      ...followingIds,
+      ...followerIds
+    ]);
+    all.delete(userId);
+
+    return Array.from(all).filter(Boolean);
+  } catch (err) {
+    console.warn("Failed to get connected user IDs:", err.message);
+    return [];
+  }
+}
+
 module.exports = {
   createNotification,
   getUserNotifications,
   markNotificationAsRead,
   markAllAsRead,
   deleteNotification,
-  getUnreadCount
+  getUnreadCount,
+  getConnectedUserIds
 };
