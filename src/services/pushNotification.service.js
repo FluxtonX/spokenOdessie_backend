@@ -45,6 +45,7 @@ async function unregisterDeviceToken({ userId, token }) {
 
 /**
  * Send real-time Web Push notification to all active devices of a user
+ * Formats with Spoken Odyssey branding, official logo, and deep-link click navigation
  */
 async function sendWebPushNotification({ userId, title, body, actionUrl, metadata }) {
   if (!userId || !title) return null;
@@ -69,7 +70,12 @@ async function sendWebPushNotification({ userId, title, body, actionUrl, metadat
       return null;
     }
 
+    // Standardize title format with Spoken Odyssey branding
+    const brandTitle = title.startsWith("Spoken Odyssey") ? title : `Spoken Odyssey • ${title}`;
+    const brandBody = String(body || "");
     const url = actionUrl || "/memories";
+    const brandIcon = "/odyssey.png";
+    const brandBadge = "/odyssey.png";
 
     // 2. Multicast batch send (up to 500 per batch)
     const chunkSize = 500;
@@ -80,12 +86,39 @@ async function sendWebPushNotification({ userId, title, body, actionUrl, metadat
 
       const payload = {
         notification: {
-          title: String(title),
-          body: String(body || ""),
+          title: brandTitle,
+          body: brandBody,
         },
         data: {
+          title: brandTitle,
+          body: brandBody,
           url: String(url),
+          actionUrl: String(url),
+          click_action: String(url),
+          icon: brandIcon,
+          badge: brandBadge,
           metadata: JSON.stringify(metadata || {}),
+        },
+        webpush: {
+          notification: {
+            title: brandTitle,
+            body: brandBody,
+            icon: brandIcon,
+            badge: brandBadge,
+            image: metadata?.imageUrl || undefined,
+            data: {
+              url: String(url),
+              actionUrl: String(url),
+              metadata: JSON.stringify(metadata || {}),
+            },
+            actions: [
+              { action: "open", title: "View Story" }
+            ],
+            requireInteraction: false,
+          },
+          fcmOptions: {
+            link: String(url),
+          },
         },
         tokens: batchTokens,
       };

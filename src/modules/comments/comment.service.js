@@ -159,8 +159,8 @@ const createComment = async ({ user, memoryId, text, parentCommentId }) => {
       await createNotification({
         userId: parentComment.ownerId,
         type: "COMMENT_REPLY",
-        title: "New Comment Reply",
-        message: `${authorName} replied to your comment: "${snippet}"`,
+        title: "New Reply",
+        message: `${authorName} replied to your reflection: "${snippet}"`,
         metadata: {
           memoryId,
           commentId: comment.id,
@@ -169,13 +169,15 @@ const createComment = async ({ user, memoryId, text, parentCommentId }) => {
         },
         actionUrl: `/memories?memoryId=${memoryId}`
       });
-    } else if (!validParentId && memory.ownerId !== user.id) {
-      // Notification for new comment on memory
+    }
+
+    if (memory.ownerId && memory.ownerId !== user.id && (!validParentId || parentComment?.ownerId !== memory.ownerId)) {
+      // Notification for new comment on memory owner
       await createNotification({
         userId: memory.ownerId,
         type: "MEMORY_COMMENT",
         title: "New Comment",
-        message: `${authorName} commented on your story "${memory.title || "Untitled"}": "${snippet}"`,
+        message: `${authorName} commented on "${memory.title || "Story"}": "${snippet}"`,
         metadata: {
           memoryId,
           commentId: comment.id,
@@ -184,6 +186,35 @@ const createComment = async ({ user, memoryId, text, parentCommentId }) => {
         actionUrl: `/memories?memoryId=${memoryId}`
       });
     }
+
+    // Notify tagged members and previous mutual commenters on this memory
+    try {
+      const otherComments = await prisma.comment.findMany({
+        where: {
+          memoryId,
+          ownerId: { notIn: [user.id, memory.ownerId, validParentId ? parentComment?.ownerId : null].filter(Boolean) }
+        },
+        select: { ownerId: true }
+      });
+      const otherCommenterIds = otherComments.map(c => c.ownerId);
+      const taggedIds = Array.isArray(memory.taggedUserIds) ? memory.taggedUserIds.filter(id => id && id !== user.id && id !== memory.ownerId) : [];
+
+      const participantIds = Array.from(new Set([...otherCommenterIds, ...taggedIds]));
+      for (const participantId of participantIds) {
+        createNotification({
+          userId: participantId,
+          type: "MEMORY_COMMENT",
+          title: "New Comment on Story",
+          message: `${authorName} also commented on "${memory.title || "Story"}": "${snippet}"`,
+          metadata: {
+            memoryId,
+            commentId: comment.id,
+            commenterId: user.id
+          },
+          actionUrl: `/memories?memoryId=${memoryId}`
+        }).catch(err => console.warn("Failed to notify memory participant:", participantId, err.message));
+      }
+    } catch (_) {}
   } catch (notifErr) {
     console.warn("Failed to create comment notification:", notifErr.message);
   }
@@ -291,8 +322,8 @@ const reactToComment = async ({ user, commentId, type }) => {
       await createNotification({
         userId: comment.ownerId,
         type: "COMMENT_REACTION",
-        title: "New Reaction on Comment",
-        message: `${authorName} reacted ${emoji} to your comment.`,
+        title: "New Reaction",
+        message: `${authorName} reacted ${emoji} to your reflection.`,
         metadata: {
           commentId,
           memoryId: comment.memoryId,
