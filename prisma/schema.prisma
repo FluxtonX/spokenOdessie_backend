@@ -91,6 +91,10 @@ model User {
   passwordChangedAt     DateTime?
   loginNotifications    Boolean           @default(true)
   notificationPreferences Json?           @default("{\"followerActivity\":true,\"familyActivity\":true,\"memoryInteractions\":true,\"securityAlerts\":true,\"loginNotifications\":true}")
+  // Store Relations
+  storeCarts            StoreCart[]
+  storeOrders           StoreOrder[]
+  storeReviews          StoreReview[]
 
   createdAt             DateTime          @default(now())
   updatedAt             DateTime          @updatedAt
@@ -458,3 +462,345 @@ model SecurityAuditLog {
   @@index([action])
   @@index([createdAt])
 }
+
+// ==========================================
+// ODYSSEY STORE E-COMMERCE DOMAIN MODELS
+// ==========================================
+
+enum StoreProductStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum StoreOrderStatus {
+  PENDING_PAYMENT
+  PAID
+  PROCESSING
+  PACKED
+  SHIPPED
+  OUT_FOR_DELIVERY
+  DELIVERED
+  PAYMENT_FAILED
+  CANCELLED
+  REFUNDED
+  RETURN_REQUESTED
+  RETURNED
+}
+
+enum StorePaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+  CANCELLED
+}
+
+enum StoreCouponType {
+  PERCENTAGE
+  FIXED
+}
+
+enum StoreShipmentStatus {
+  PREPARING
+  PACKED
+  SHIPPED
+  IN_TRANSIT
+  OUT_FOR_DELIVERY
+  DELIVERED
+  FAILED_ATTEMPT
+  RETURNED
+}
+
+model StoreCategory {
+  id          String         @id @default(uuid())
+  name        String         @unique
+  slug        String         @unique
+  description String?
+  image       String?
+  isActive    Boolean        @default(true)
+  order       Int            @default(0)
+  products    StoreProduct[]
+
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([slug])
+  @@index([isActive])
+}
+
+model StoreProduct {
+  id                String                @id @default(uuid())
+  slug              String                @unique
+  name              String
+  tagline           String?               @default("")
+  badge             String?               @default("")
+  rating            Float                 @default(5.0)
+  reviewsCount      Int                   @default(0)
+  basePrice         Float
+  originalPrice     Float?
+  description       String
+  features          String[]              @default([])
+  specs             Json?                 @default("{}")
+  images            Json?                 @default("{}")
+  hardwareHotspots  Json?                 @default("[]")
+  status            StoreProductStatus    @default(ACTIVE)
+  featured          Boolean               @default(false)
+  categoryId        String?
+  category          StoreCategory?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  variants          StoreProductVariant[]
+  options           StoreProductOption[]
+  inventory         StoreInventory[]
+  cartItems         StoreCartItem[]
+  orderItems        StoreOrderItem[]
+  reviews           StoreReview[]
+
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  @@index([slug])
+  @@index([status])
+  @@index([categoryId])
+  @@index([featured])
+}
+
+model StoreProductVariant {
+  id              String           @id @default(uuid())
+  productId       String
+  product         StoreProduct     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  name            String
+  colorHex        String
+  colorName       String
+  badge           String?          @default("")
+  sku             String?
+  priceAdjustment Float            @default(0.0)
+  stock           Int              @default(100)
+  isActive        Boolean          @default(true)
+
+  inventory       StoreInventory[]
+  cartItems       StoreCartItem[]
+  orderItems      StoreOrderItem[]
+
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@index([productId])
+  @@index([sku])
+}
+
+model StoreProductOption {
+  id          String           @id @default(uuid())
+  productId   String
+  product     StoreProduct     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  type        String           // "storage" | "lens"
+  name        String
+  size        String?
+  description String?
+  priceAdd    Float            @default(0.0)
+  sku         String?
+  stock       Int              @default(100)
+  isActive    Boolean          @default(true)
+
+  inventory   StoreInventory[]
+
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@index([productId])
+  @@index([type])
+}
+
+model StoreInventory {
+  id           String               @id @default(uuid())
+  productId    String
+  product      StoreProduct         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variantId    String?
+  variant      StoreProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+  optionId     String?
+  option       StoreProductOption?  @relation(fields: [optionId], references: [id], onDelete: SetNull)
+  sku          String               @unique
+  quantity     Int                  @default(100)
+  reserved     Int                  @default(0)
+  minThreshold Int                  @default(5)
+
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+
+  @@index([productId])
+  @@index([variantId])
+  @@index([sku])
+}
+
+model StoreCart {
+  id        String          @id @default(uuid())
+  userId    String          @unique
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items     StoreCartItem[]
+
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  @@index([userId])
+}
+
+model StoreCartItem {
+  id               String               @id @default(uuid())
+  cartId           String
+  cart             StoreCart            @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productId        String
+  product          StoreProduct         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variantId        String?
+  variant          StoreProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+  storageOptionId  String?
+  lensOptionId     String?
+  quantity         Int                  @default(1)
+  unitPrice        Float
+
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+
+  @@index([cartId])
+  @@index([productId])
+}
+
+model StoreCoupon {
+  id             String          @id @default(uuid())
+  code           String          @unique
+  type           StoreCouponType @default(PERCENTAGE)
+  discountValue  Float
+  minOrderAmount Float           @default(0.0)
+  maxDiscount    Float?
+  maxUses        Int?
+  usedCount      Int             @default(0)
+  perUserLimit   Int             @default(1)
+  expiresAt      DateTime?
+  isActive       Boolean         @default(true)
+
+  orders         StoreOrder[]
+
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  @@index([code])
+  @@index([isActive])
+}
+
+model StoreOrder {
+  id                  String                    @id @default(uuid())
+  orderNumber         String                    @unique
+  userId              String
+  user                User                      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  status              StoreOrderStatus          @default(PENDING_PAYMENT)
+  paymentStatus       StorePaymentStatus        @default(PENDING)
+  paymentIntentId     String?                   @unique
+  stripeSessionId     String?
+  subtotal            Float
+  discount            Float                     @default(0.0)
+  shippingCost        Float                     @default(0.0)
+  total               Float
+  currency            String                    @default("usd")
+  
+  couponId            String?
+  coupon              StoreCoupon?              @relation(fields: [couponId], references: [id], onDelete: SetNull)
+
+  shippingAddress     Json                      // Snapshot of recipient & address
+  billingAddress      Json?                     // Snapshot of billing info
+  customerEmail       String
+  customerName        String
+  customerPhone       String?
+
+  items               StoreOrderItem[]
+  statusHistory       StoreOrderStatusHistory[]
+  shipments           StoreShipment[]
+
+  createdAt           DateTime                  @default(now())
+  updatedAt           DateTime                  @updatedAt
+
+  @@index([userId])
+  @@index([orderNumber])
+  @@index([status])
+  @@index([paymentStatus])
+  @@index([createdAt])
+}
+
+model StoreOrderItem {
+  id             String               @id @default(uuid())
+  orderId        String
+  order          StoreOrder           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId      String
+  product        StoreProduct         @relation(fields: [productId], references: [id], onDelete: Restrict)
+  variantId      String?
+  variant        StoreProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+  productName    String
+  variantName    String?
+  storageName    String?
+  lensName       String?
+  sku            String?
+  quantity       Int
+  unitPrice      Float
+  total          Float
+  image          String?
+  specsSnapshot  Json?
+
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+model StoreOrderStatusHistory {
+  id        String           @id @default(uuid())
+  orderId   String
+  order     StoreOrder       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status    StoreOrderStatus
+  notes     String?
+  changedBy String?          @default("SYSTEM")
+
+  createdAt DateTime         @default(now())
+
+  @@index([orderId])
+  @@index([createdAt])
+}
+
+model StoreShipment {
+  id                String              @id @default(uuid())
+  orderId           String
+  order             StoreOrder          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  trackingNumber    String              @unique
+  carrier           String              @default("DHL Express")
+  status            StoreShipmentStatus @default(PREPARING)
+  labelUrl          String?
+  estimatedDelivery DateTime?
+  actualDelivery    DateTime?
+  timeline          Json?               @default("[]")
+
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  @@index([orderId])
+  @@index([trackingNumber])
+  @@index([status])
+}
+
+model StoreReview {
+  id               String       @id @default(uuid())
+  productId        String
+  product          StoreProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+  userId           String
+  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rating           Int          @default(5)
+  title            String?
+  comment          String
+  verifiedPurchase Boolean      @default(false)
+  isApproved       Boolean      @default(true)
+
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  @@index([productId])
+  @@index([userId])
+  @@index([isApproved])
+}
+
