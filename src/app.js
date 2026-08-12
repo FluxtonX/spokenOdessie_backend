@@ -17,6 +17,7 @@ const familyCircleRoutes = require("./modules/familyCircle/familyCircle.routes")
 const notificationRoutes = require("./modules/notifications/notification.routes");
 const legacyAccessRoutes = require("./modules/legacyAccess/legacyAccess.routes");
 const insightsRoutes = require("./modules/insights/insights.routes");
+const odysseyStoreRoutes = require("./modules/odysseyStore/index");
 
 const app = express();
 
@@ -74,6 +75,9 @@ app.use("/api/family-circle", familyCircleRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/legacy-access", legacyAccessRoutes);
 app.use("/api/insights", insightsRoutes);
+
+// Odyssey Store e-commerce module — isolated domain at /api/v1/store
+app.use("/api/v1/store", odysseyStoreRoutes);
 
 app.get("/health", (req, res) => {
   res.status(200).json({
