@@ -18,4 +18,7 @@ router.post("/create-checkout-session", protect, controller.createCheckoutSessio
 // 2. Embedded PaymentIntent (Elements)
 router.post("/create-intent", protect, controller.createCheckoutIntent);
 
+// 3. Instant Payment & Session Verification (for success page or return from Stripe)
+router.post("/verify-session", controller.verifySession);
+
 module.exports = router;

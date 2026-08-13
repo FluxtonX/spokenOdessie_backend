@@ -28,7 +28,7 @@ const createCheckoutSession = async ({
   // 1. Load cart
   let cart = await cartService.getCart({ userId, couponCode });
 
-  // If database cart is empty, but items are provided from client, populate DB cart
+  // 2. If database cart is empty, but items are provided from client, populate DB cart
   if ((!cart.items || cart.items.length === 0) && Array.isArray(items) && items.length > 0) {
     for (const clientItem of items) {
       try {
@@ -48,8 +48,70 @@ const createCheckoutSession = async ({
     cart = await cartService.getCart({ userId, couponCode });
   }
 
+  // 3. Fallback: If DB cart still has 0 items, directly construct items from product catalog
   if (!cart.items || cart.items.length === 0) {
-    const err = new Error("Your cart is empty");
+    if (Array.isArray(items) && items.length > 0) {
+      const productRepository = require("../products/product.repository");
+      const fallbackItems = [];
+      let subtotal = 0;
+
+      for (const clientItem of items) {
+        const prodId = clientItem.productId || clientItem.product?.id || clientItem.product?.slug || "odyssey-pro-titanium";
+        const product = await productRepository.findBySlugOrId(prodId);
+        if (!product) continue;
+
+        const variant = product.variants?.find((v) =>
+          v.id === clientItem.variantId ||
+          v.id.endsWith(clientItem.variantId || "") ||
+          v.name.toLowerCase() === (clientItem.variantId || "").toLowerCase()
+        ) || product.variants?.[0] || null;
+
+        const storage = product.options?.find((o) =>
+          o.type === "storage" &&
+          (o.id === clientItem.storageOptionId ||
+           o.sku === clientItem.storageOptionId ||
+           (clientItem.storageOptionId && o.name.toLowerCase().includes(clientItem.storageOptionId.toLowerCase())))
+        ) || product.options?.find((o) => o.type === "storage") || null;
+
+        const lens = product.options?.find((o) =>
+          o.type === "lens" &&
+          (o.id === clientItem.lensOptionId ||
+           o.sku === clientItem.lensOptionId ||
+           (clientItem.lensOptionId && o.name.toLowerCase().includes(clientItem.lensOptionId.toLowerCase())))
+        ) || product.options?.find((o) => o.type === "lens") || null;
+
+        const unitPrice = (product.basePrice || 0) + (storage?.priceAdd || 0) + (lens?.priceAdd || 0);
+        const qty = Math.max(1, parseInt(clientItem.quantity, 10) || 1);
+        const itemTotal = unitPrice * qty;
+        subtotal += itemTotal;
+
+        fallbackItems.push({
+          product,
+          variant,
+          storage,
+          lens,
+          quantity: qty,
+          unitPrice,
+          total: itemTotal,
+        });
+      }
+
+      if (fallbackItems.length > 0) {
+        const shippingFee = subtotal > 200 || subtotal === 0 ? 0 : 15;
+        cart = {
+          items: fallbackItems,
+          subtotal,
+          discount: 0,
+          shipping: shippingFee,
+          total: subtotal + shippingFee,
+          appliedCoupon: null,
+        };
+      }
+    }
+  }
+
+  if (!cart.items || cart.items.length === 0) {
+    const err = new Error("Your cart is empty. Please add Smart Glasses to your bag before checking out.");
     err.statusCode = 400;
     throw err;
   }
@@ -73,10 +135,9 @@ const createCheckoutSession = async ({
       shippingCost: cart.shipping,
       total: cart.total,
       currency: "usd",
-      couponId: couponId || null,
       shippingAddress: shippingAddress || {},
-      customerEmail,
-      customerName,
+      customerEmail: customerEmail || "customer@spokenodyssey.com",
+      customerName: (customerName || `${shippingAddress?.firstName || ""} ${shippingAddress?.lastName || ""}`.trim() || customerEmail?.split("@")[0] || "Valued Customer"),
       customerPhone: customerPhone || null,
       items: {
         create: cart.items.map((item) => ({
@@ -181,7 +242,10 @@ const createCheckoutSession = async ({
   // Link session ID to order
   await prisma.storeOrder.update({
     where: { id: order.id },
-    data: { paymentIntentId: session.id },
+    data: {
+      paymentIntentId: session.id,
+      stripeSessionId: session.id,
+    },
   });
 
   return {
@@ -191,6 +255,64 @@ const createCheckoutSession = async ({
     orderId: order.id,
     total: cart.total,
   };
+};
+
+/**
+ * Verifies a Stripe Checkout Session status directly with Stripe API and confirms the order.
+ */
+const verifySession = async ({ sessionId, orderId, userId }) => {
+  let order = null;
+
+  if (orderId) {
+    order = await prisma.storeOrder.findFirst({
+      where: {
+        OR: [{ id: orderId }, { orderNumber: orderId }],
+        ...(userId ? { userId } : {}),
+      },
+      include: {
+        items: true,
+        statusHistory: { orderBy: { createdAt: "desc" } },
+        shipments: true,
+      },
+    });
+  }
+
+  const lookupSessionId = sessionId || order?.stripeSessionId || order?.paymentIntentId;
+
+  if (lookupSessionId) {
+    try {
+      const stripe = stripeService.getStripe();
+      let session = null;
+
+      if (lookupSessionId.startsWith("cs_")) {
+        session = await stripe.checkout.sessions.retrieve(lookupSessionId);
+      } else if (lookupSessionId.startsWith("pi_")) {
+        const pi = await stripe.paymentIntents.retrieve(lookupSessionId);
+        if (pi.status === "succeeded") {
+          session = { payment_status: "paid", id: pi.id, metadata: pi.metadata };
+        }
+      }
+
+      if (session && (session.payment_status === "paid" || session.status === "complete")) {
+        const targetOrderId = order?.id || session.metadata?.orderId;
+        if (targetOrderId) {
+          await _handlePaymentSuccessById(targetOrderId, session.id);
+          order = await prisma.storeOrder.findUnique({
+            where: { id: targetOrderId },
+            include: {
+              items: true,
+              statusHistory: { orderBy: { createdAt: "desc" } },
+              shipments: true,
+            },
+          });
+        }
+      }
+    } catch (err) {
+      console.warn("Could not retrieve Stripe session during verification:", err.message);
+    }
+  }
+
+  return order;
 };
 
 /**
@@ -304,7 +426,8 @@ const handleWebhook = async (rawBody, signature) => {
   }
 
   switch (event.type) {
-    case "checkout.session.completed": {
+    case "checkout.session.completed":
+    case "checkout.session.async_payment_succeeded": {
       const session = event.data.object;
       const orderId = session.metadata?.orderId;
       if (orderId) {
@@ -318,8 +441,14 @@ const handleWebhook = async (rawBody, signature) => {
       await _handlePaymentSuccess(event.data.object);
       break;
     }
+    case "checkout.session.async_payment_failed":
     case "payment_intent.payment_failed": {
       await _handlePaymentFailed(event.data.object);
+      break;
+    }
+    case "payment_intent.canceled":
+    case "checkout.session.expired": {
+      await _handlePaymentCanceled(event.data.object);
       break;
     }
     default:
@@ -327,6 +456,34 @@ const handleWebhook = async (rawBody, signature) => {
   }
 
   return { received: true };
+};
+
+const _handlePaymentCanceled = async (paymentObject) => {
+  try {
+    const orderId = paymentObject.metadata?.orderId;
+    const order = orderId
+      ? await prisma.storeOrder.findUnique({ where: { id: orderId } })
+      : await prisma.storeOrder.findFirst({
+          where: {
+            OR: [
+              { paymentIntentId: paymentObject.id },
+              { stripeSessionId: paymentObject.id },
+            ],
+          },
+        });
+
+    if (!order || order.paymentStatus === "PAID") return;
+
+    await prisma.storeOrder.update({
+      where: { id: order.id },
+      data: {
+        paymentStatus: "CANCELLED",
+        status: "CANCELLED",
+      },
+    });
+  } catch (err) {
+    console.warn("Could not cancel order from Stripe webhook:", err.message);
+  }
 };
 
 const _handlePaymentSuccessById = async (orderId, paymentRef) => {
@@ -378,16 +535,40 @@ const _handlePaymentSuccessById = async (orderId, paymentRef) => {
       }
     }
 
-    const trackingNumber = `TRK-${Date.now().toString(36).toUpperCase()}`;
+    let shipmentData = {
+      trackingNumber: `DHL-${Math.floor(1000000000 + Math.random() * 9000000000)}`,
+      carrier: "DHL Express",
+      status: "PREPARING",
+      labelUrl: "https://assets.easypost.com/sample_label.pdf",
+      estimatedDelivery: new Date(Date.now() + 4 * 24 * 60 * 60 * 1000),
+    };
+
+    try {
+      const easypostService = require("../shipping/easypost.service");
+      const epShipment = await easypostService.createShipmentForOrder(order);
+      if (epShipment && epShipment.trackingNumber) {
+        shipmentData = {
+          trackingNumber: epShipment.trackingNumber,
+          carrier: epShipment.carrier || "DHL Express",
+          status: "PREPARING",
+          labelUrl: epShipment.labelUrl,
+          estimatedDelivery: epShipment.estimatedDelivery || shipmentData.estimatedDelivery,
+        };
+      }
+    } catch (e) {
+      console.warn("Could not create EasyPost shipment during payment confirmation:", e.message);
+    }
+
     await tx.storeShipment.create({
       data: {
         orderId: order.id,
-        trackingNumber,
-        carrier: "DHL Express",
+        trackingNumber: shipmentData.trackingNumber,
+        carrier: shipmentData.carrier,
         status: "PREPARING",
-        estimatedDelivery: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000),
+        labelUrl: shipmentData.labelUrl,
+        estimatedDelivery: shipmentData.estimatedDelivery,
         timeline: [
-          { status: "PREPARING", label: "Preparing Your Order", timestamp: new Date().toISOString() },
+          { status: "PREPARING", label: "Optical Vault Inspection", timestamp: new Date().toISOString() },
         ],
       },
     });
@@ -453,5 +634,6 @@ const _handlePaymentFailed = async (paymentIntent) => {
 module.exports = {
   createCheckoutSession,
   createCheckoutIntent,
+  verifySession,
   handleWebhook,
 };

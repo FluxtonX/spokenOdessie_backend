@@ -3,6 +3,77 @@ const productRepository = require("../products/product.repository");
 const couponService = require("../coupons/coupon.service");
 const prisma = require("../../../config/prisma");
 
+const resolveVariant = (product, variantId) => {
+  if (!product?.variants || product.variants.length === 0) return null;
+  if (!variantId) return product.variants[0];
+  const clean = variantId.toLowerCase().trim();
+  return (
+    product.variants.find(
+      (v) =>
+        v.id.toLowerCase() === clean ||
+        v.id.toLowerCase().endsWith(clean) ||
+        v.id.toLowerCase().endsWith(`-${clean}`) ||
+        v.name.toLowerCase() === clean ||
+        (v.sku && v.sku.toLowerCase() === clean) ||
+        (v.colorName && v.colorName.toLowerCase() === clean)
+    ) || product.variants[0]
+  );
+};
+
+const resolveStorage = (product, storageOptionId) => {
+  if (!product?.options) return null;
+  const storageOptions = product.options.filter((o) => o.type === "storage");
+  if (storageOptions.length === 0) return null;
+  if (!storageOptionId) return storageOptions[0];
+
+  const clean = storageOptionId.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return (
+    storageOptions.find((o) => {
+      const oId = o.id.toLowerCase();
+      const oSku = (o.sku || "").toLowerCase();
+      const oName = (o.name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+      const oSize = (o.size || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+      return (
+        o.id === storageOptionId ||
+        oSku === storageOptionId.toLowerCase() ||
+        oName === clean ||
+        oSize === clean ||
+        oId.endsWith(storageOptionId.toLowerCase()) ||
+        (clean.includes("64") && (oSku.includes("64") || oName.includes("64"))) ||
+        (clean.includes("128") && (oSku.includes("128") || oName.includes("128"))) ||
+        (clean.includes("256") && (oSku.includes("256") || oName.includes("256")))
+      );
+    }) || storageOptions[0]
+  );
+};
+
+const resolveLens = (product, lensOptionId) => {
+  if (!product?.options) return null;
+  const lensOptions = product.options.filter((o) => o.type === "lens");
+  if (lensOptions.length === 0) return null;
+  if (!lensOptionId) return lensOptions[0];
+
+  const clean = lensOptionId.toLowerCase().trim();
+  return (
+    lensOptions.find((o) => {
+      const oId = o.id.toLowerCase();
+      const oSku = (o.sku || "").toLowerCase();
+      const oName = (o.name || "").toLowerCase();
+      return (
+        o.id === lensOptionId ||
+        oSku === clean ||
+        oName.includes(clean) ||
+        oId.endsWith(clean) ||
+        (clean.includes("blue") && (oSku.includes("blu") || oName.includes("blue"))) ||
+        (clean.includes("sun") && (oSku.includes("sun") || oName.includes("sun") || oName.includes("polar"))) ||
+        (clean.includes("polar") && (oSku.includes("sun") || oName.includes("polar"))) ||
+        (clean.includes("prescrip") && (oSku.includes("rx") || oName.includes("prescrip"))) ||
+        (clean.includes("mir") && (oSku.includes("mir") || oName.includes("mirror")))
+      );
+    }) || lensOptions[0]
+  );
+};
+
 const formatCart = async (cart, couponCode = null, userId = null) => {
   let subtotal = 0;
   const formattedItems = [];
@@ -11,9 +82,9 @@ const formatCart = async (cart, couponCode = null, userId = null) => {
     const product = item.product;
     if (!product || product.status !== "ACTIVE") continue;
 
-    const variant = item.variant || product.variants?.find((v) => v.id === item.variantId);
-    const storageOption = product.options?.find((o) => o.id === item.storageOptionId || o.sku === item.storageOptionId);
-    const lensOption = product.options?.find((o) => o.id === item.lensOptionId || o.sku === item.lensOptionId);
+    const variant = resolveVariant(product, item.variantId);
+    const storageOption = resolveStorage(product, item.storageOptionId);
+    const lensOption = resolveLens(product, item.lensOptionId);
 
     const basePrice = product.basePrice || 0;
     const storagePrice = storageOption?.priceAdd || 0;
@@ -112,18 +183,9 @@ const addItem = async ({ userId, productId, variantId, storageOptionId, lensOpti
     throw error;
   }
 
-  let resolvedVariant = null;
-  if (variantId) {
-    resolvedVariant = product.variants?.find((v) => v.id === variantId || v.id.endsWith(variantId));
-  }
-
-  const storageOption = product.options?.find(
-    (o) => o.id === storageOptionId || o.sku === storageOptionId || (o.type === "storage" && o.name === storageOptionId)
-  );
-
-  const lensOption = product.options?.find(
-    (o) => o.id === lensOptionId || o.sku === lensOptionId || (o.type === "lens" && o.name === lensOptionId)
-  );
+  const resolvedVariant = resolveVariant(product, variantId);
+  const storageOption = resolveStorage(product, storageOptionId);
+  const lensOption = resolveLens(product, lensOptionId);
 
   const unitPrice = (product.basePrice || 0) + (storageOption?.priceAdd || 0) + (lensOption?.priceAdd || 0);
 

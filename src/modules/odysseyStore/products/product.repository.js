@@ -75,7 +75,10 @@ const findAll = async ({
 };
 
 const findBySlugOrId = async (identifier) => {
-  return prisma.storeProduct.findFirst({
+  if (!identifier) return null;
+
+  // 1. Direct ID or exact slug match
+  let product = await prisma.storeProduct.findFirst({
     where: {
       OR: [{ slug: identifier }, { id: identifier }],
     },
@@ -103,6 +106,44 @@ const findBySlugOrId = async (identifier) => {
       },
     },
   });
+
+  if (product) return product;
+
+  // 2. Alias / fuzzy match for frontend product IDs (e.g. "odyssey-pro-titanium", "odyssey-sport-polarized", etc.)
+  const clean = identifier.toLowerCase().replace(/^odyssey-/, "");
+  product = await prisma.storeProduct.findFirst({
+    where: {
+      OR: [
+        { slug: { contains: clean } },
+        { name: { contains: clean, mode: "insensitive" } },
+      ],
+    },
+    include: {
+      category: true,
+      variants: { where: { isActive: true } },
+      options: { where: { isActive: true } },
+      inventory: true,
+      reviews: {
+        where: { isApproved: true },
+        orderBy: { createdAt: "desc" },
+        take: 10,
+        include: {
+          user: {
+            select: {
+              id: true,
+              displayName: true,
+              photoURL: true,
+            },
+          },
+        },
+      },
+      _count: {
+        select: { reviews: true },
+      },
+    },
+  });
+
+  return product;
 };
 
 const findById = async (id) => {

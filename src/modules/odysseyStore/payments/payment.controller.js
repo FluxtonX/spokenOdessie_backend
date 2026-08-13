@@ -55,8 +55,23 @@ const createCheckoutIntent = async (req, res, next) => {
 const handleWebhook = async (req, res, next) => {
   try {
     const signature = req.headers["stripe-signature"];
-    const result = await paymentService.handleWebhook(req.body, signature);
+    const payload = req.rawBody || req.body;
+    const result = await paymentService.handleWebhook(payload, signature);
     res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+};
+
+const verifySession = async (req, res, next) => {
+  try {
+    const userId = req.user?.id;
+    const { sessionId, orderId } = req.body;
+    const order = await paymentService.verifySession({ sessionId, orderId, userId });
+    res.status(200).json({
+      success: true,
+      data: order,
+    });
   } catch (error) {
     next(error);
   }
@@ -65,5 +80,6 @@ const handleWebhook = async (req, res, next) => {
 module.exports = {
   createCheckoutSession,
   createCheckoutIntent,
+  verifySession,
   handleWebhook,
 };

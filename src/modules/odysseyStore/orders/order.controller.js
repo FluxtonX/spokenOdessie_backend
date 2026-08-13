@@ -89,10 +89,32 @@ const getAllOrders = async (req, res, next) => {
   }
 };
 
+// Dispatch & hand to courier
+const dispatchOrder = async (req, res, next) => {
+  try {
+    const orderId = req.params.id;
+    const { carrier, trackingNumber, labelUrl, notes } = req.body;
+    const result = await orderService.dispatchOrder({
+      orderId,
+      carrier,
+      trackingNumber,
+      labelUrl,
+      notes,
+    });
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getMyOrders,
   getOrderById,
   getOrderTracking,
   updateOrderStatus,
+  dispatchOrder,
   getAllOrders,
 };
