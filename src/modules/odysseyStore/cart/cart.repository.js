@@ -40,23 +40,32 @@ const findOrCreateByUserId = async (userId) => {
   return cart;
 };
 
-const addItem = async ({ cartId, productId, variantId, storageOptionId, lensOptionId, quantity, unitPrice }) => {
+const addItem = async ({ cartId, productId, variantId, storageOptionId, lensOptionId, quantity, unitPrice, mode = "add" }) => {
   // Check if identical configuration item exists in cart
-  const existingItem = await prisma.storeCartItem.findFirst({
+  const existingItems = await prisma.storeCartItem.findMany({
     where: {
       cartId,
       productId,
-      variantId: variantId || null,
-      storageOptionId: storageOptionId || null,
-      lensOptionId: lensOptionId || null,
     },
   });
 
+  const existingItem =
+    existingItems.find(
+      (item) =>
+        (!variantId || !item.variantId || item.variantId === variantId) &&
+        (!storageOptionId || !item.storageOptionId || item.storageOptionId === storageOptionId) &&
+        (!lensOptionId || !item.lensOptionId || item.lensOptionId === lensOptionId)
+    ) || existingItems[0];
+
   if (existingItem) {
+    const finalQuantity = mode === "set" ? quantity : (existingItem.quantity + quantity);
     return prisma.storeCartItem.update({
       where: { id: existingItem.id },
       data: {
-        quantity: existingItem.quantity + quantity,
+        variantId: variantId || existingItem.variantId,
+        storageOptionId: storageOptionId || existingItem.storageOptionId,
+        lensOptionId: lensOptionId || existingItem.lensOptionId,
+        quantity: Math.max(1, finalQuantity),
         unitPrice,
       },
     });
@@ -69,7 +78,7 @@ const addItem = async ({ cartId, productId, variantId, storageOptionId, lensOpti
       variantId: variantId || null,
       storageOptionId: storageOptionId || null,
       lensOptionId: lensOptionId || null,
-      quantity,
+      quantity: Math.max(1, quantity),
       unitPrice,
     },
   });

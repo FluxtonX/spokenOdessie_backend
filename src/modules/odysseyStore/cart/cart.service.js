@@ -75,8 +75,8 @@ const resolveLens = (product, lensOptionId) => {
 };
 
 const formatCart = async (cart, couponCode = null, userId = null) => {
-  let subtotal = 0;
-  const formattedItems = [];
+  const itemsMap = new Map();
+  const duplicateIdsToDelete = [];
 
   for (const item of cart.items) {
     const product = item.product;
@@ -91,53 +91,71 @@ const formatCart = async (cart, couponCode = null, userId = null) => {
     const lensPrice = lensOption?.priceAdd || 0;
     const unitPrice = basePrice + storagePrice + lensPrice;
 
-    const itemTotal = unitPrice * item.quantity;
-    subtotal += itemTotal;
+    const cartItemId = `${product.id}-${variant?.id || "default"}-${storageOption?.id || "default"}-${lensOption?.id || "default"}`;
 
-    formattedItems.push({
-      id: item.id,
-      cartItemId: `${product.id}-${variant?.id || "default"}-${storageOption?.id || "default"}-${lensOption?.id || "default"}`,
-      product: {
-        id: product.id,
-        slug: product.slug,
-        name: product.name,
-        tagline: product.tagline,
-        badge: product.badge,
-        basePrice: product.basePrice,
-        images: product.images,
-        specs: product.specs,
-      },
-      variant: variant
-        ? {
-            id: variant.id,
-            name: variant.name,
-            colorHex: variant.colorHex,
-            colorName: variant.colorName,
-            badge: variant.badge,
-          }
-        : null,
-      storage: storageOption
-        ? {
-            id: storageOption.id,
-            size: storageOption.size,
-            name: storageOption.name,
-            priceAdd: storageOption.priceAdd,
-            description: storageOption.description,
-          }
-        : null,
-      lens: lensOption
-        ? {
-            id: lensOption.id,
-            name: lensOption.name,
-            priceAdd: lensOption.priceAdd,
-            type: lensOption.description || lensOption.name,
-          }
-        : null,
-      quantity: item.quantity,
-      unitPrice,
-      total: itemTotal,
-    });
+    if (itemsMap.has(cartItemId)) {
+      // Clean up redundant duplicate DB item row cleanly on read without mutating quantity!
+      duplicateIdsToDelete.push(item.id);
+    } else {
+      itemsMap.set(cartItemId, {
+        id: item.id,
+        cartItemId,
+        product: {
+          id: product.id,
+          slug: product.slug,
+          name: product.name,
+          tagline: product.tagline,
+          badge: product.badge,
+          basePrice: product.basePrice,
+          images: product.images,
+          specs: product.specs,
+        },
+        variant: variant
+          ? {
+              id: variant.id,
+              name: variant.name,
+              colorHex: variant.colorHex,
+              colorName: variant.colorName,
+              badge: variant.badge,
+            }
+          : null,
+        storage: storageOption
+          ? {
+              id: storageOption.id,
+              size: storageOption.size,
+              name: storageOption.name,
+              priceAdd: storageOption.priceAdd,
+              description: storageOption.description,
+            }
+          : null,
+        lens: lensOption
+          ? {
+              id: lensOption.id,
+              name: lensOption.name,
+              priceAdd: lensOption.priceAdd,
+              type: lensOption.description || lensOption.name,
+            }
+          : null,
+        quantity: item.quantity,
+        unitPrice,
+        total: unitPrice * item.quantity,
+      });
+    }
   }
+
+  // AWAIT deletion of duplicate rows synchronously so PostgreSQL DB is permanently cleaned up!
+  if (duplicateIdsToDelete.length > 0) {
+    try {
+      await prisma.storeCartItem.deleteMany({
+        where: { id: { in: duplicateIdsToDelete } },
+      });
+    } catch (e) {
+      console.warn("Cart duplicate cleanup warning:", e.message);
+    }
+  }
+
+  const formattedItems = Array.from(itemsMap.values());
+  const subtotal = formattedItems.reduce((sum, i) => sum + i.total, 0);
 
   let discountAmount = 0;
   let appliedCouponData = null;
@@ -175,7 +193,7 @@ const getCart = async ({ userId, couponCode }) => {
   return formatCart(cart, couponCode, userId);
 };
 
-const addItem = async ({ userId, productId, variantId, storageOptionId, lensOptionId, quantity = 1 }) => {
+const addItem = async ({ userId, productId, variantId, storageOptionId, lensOptionId, quantity = 1, mode = "add" }) => {
   const product = await productRepository.findBySlugOrId(productId);
   if (!product || product.status !== "ACTIVE") {
     const error = new Error("Product not available");
@@ -198,6 +216,7 @@ const addItem = async ({ userId, productId, variantId, storageOptionId, lensOpti
     lensOptionId: lensOption ? lensOption.id : null,
     quantity: Math.max(1, parseInt(quantity, 10) || 1),
     unitPrice,
+    mode,
   });
 
   const updatedCart = await cartRepository.findOrCreateByUserId(userId);
