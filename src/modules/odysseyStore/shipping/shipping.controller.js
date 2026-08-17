@@ -17,6 +17,16 @@ const calculateShipping = async (req, res, next) => {
   }
 };
 
+const handleWebhook = async (req, res, next) => {
+  try {
+    const result = await shippingService.handleTrackingWebhook(req.body);
+    res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   calculateShipping,
+  handleWebhook,
 };

@@ -17,7 +17,7 @@ const getCart = async (req, res, next) => {
 const addItem = async (req, res, next) => {
   try {
     const userId = req.user.id;
-    const { productId, variantId, storageOptionId, lensOptionId, quantity } = req.body;
+    const { productId, variantId, storageOptionId, lensOptionId, quantity, mode } = req.body;
     const cart = await cartService.addItem({
       userId,
       productId,
@@ -25,6 +25,7 @@ const addItem = async (req, res, next) => {
       storageOptionId,
       lensOptionId,
       quantity,
+      mode,
     });
     res.status(200).json({
       success: true,
