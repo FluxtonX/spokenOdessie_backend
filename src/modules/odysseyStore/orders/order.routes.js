@@ -14,6 +14,7 @@ router.get("/:id/tracking", controller.getOrderTracking);
 
 // Admin routes
 router.patch("/:id/status", controller.updateOrderStatus);
+router.post("/:id/dispatch", controller.dispatchOrder);
 router.get("/admin/all", controller.getAllOrders);
 
 module.exports = router;
