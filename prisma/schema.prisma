@@ -72,6 +72,17 @@ model User {
 
   // Family Circle Memberships
   familyMemberships     FamilyMember[]
+  createdFamilyCircles  FamilyCircle[]     @relation("CircleCreator")
+  guardianChildren      FamilyMember[]     @relation("GuardianChildren")
+  familyMemoryLinks     FamilyMemoryLink[]
+  mediaAssets           MediaAsset[]
+  storyLayers           StoryLayer[]
+  createdPrompts        FamilyPrompt[]
+  promptResponses       FamilyResponse[]
+  childConsents         GuardianConsent[]  @relation("ChildConsent")
+  guardianConsents      GuardianConsent[]  @relation("GuardianConsent")
+  relFromEdges          FamilyRelationshipEdge[] @relation("RelFromUser")
+  relToEdges            FamilyRelationshipEdge[] @relation("RelToUser")
 
   // Notifications
   notifications         Notification[]
@@ -126,7 +137,16 @@ enum Role {
 
 enum FamilyRole {
   ADMIN
+  ADULT_MEMBER
+  CONTRIBUTOR
+  RESTRICTED_MINOR
+  GUEST
   MEMBER
+}
+
+enum MemberStatus {
+  ACTIVE
+  SUSPENDED
 }
 
 model Follow {
@@ -163,19 +183,32 @@ model FamilyCircle {
   id          String   @id @default(uuid())
   name        String   @default("My Family")
   description String   @default("")
+  avatarUrl   String?
+  coverUrl    String?
+  createdById String?
+
+  createdBy   User?    @relation("CircleCreator", fields: [createdById], references: [id], onDelete: SetNull)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   members     FamilyMember[]
   invitations FamilyInvitation[]
+  memoryLinks FamilyMemoryLink[]
+  prompts     FamilyPrompt[]
+  relationshipEdges FamilyRelationshipEdge[]
 }
 
 model FamilyMember {
   id              String       @id @default(uuid())
   familyCircleId  String
   userId          String
-  role            FamilyRole   @default(MEMBER)
+  role            FamilyRole   @default(ADULT_MEMBER)
+  status          MemberStatus @default(ACTIVE)
   relationship    String       @default("Family Member")
+  
+  guardianUserId  String?
+  guardian        User?        @relation("GuardianChildren", fields: [guardianUserId], references: [id], onDelete: SetNull)
+
   invitedBy       String?
   approvedBy      String?
 
@@ -186,7 +219,7 @@ model FamilyMember {
   approvedAt      DateTime?
 
   @@unique([familyCircleId, userId])
-  @@index([familyCircleId])
+  @@index([familyCircleId, status])
   @@index([userId])
   @@index([role])
 }
@@ -279,6 +312,9 @@ model Memory {
 
   comments          Comment[]
   reactions         PostReaction[]
+  familyLinks       FamilyMemoryLink[]
+  mediaAssets       MediaAsset[]
+  storyLayers       StoryLayer[]
 
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
@@ -287,6 +323,154 @@ model Memory {
   @@index([albumId])
   @@index([status])
   @@index([privacy])
+  @@index([ownerId, status, occurredAt(sort: Desc)])
+}
+
+model StoryLayer {
+  id            String   @id @default(uuid())
+  memoryId      String
+  authorId      String
+  text          String   @default("")
+  audioKey      String?
+  audioDuration Float?
+  occurredAt    DateTime @default(now())
+
+  memory        Memory   @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  author        User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([memoryId])
+  @@index([authorId])
+  @@map("story_layers")
+}
+
+model FamilyPrompt {
+  id             String           @id @default(uuid())
+  familyCircleId String
+  createdById    String
+  question       String
+  category       String           @default("Heritage")
+  isActive       Boolean          @default(true)
+
+  familyCircle   FamilyCircle     @relation(fields: [familyCircleId], references: [id], onDelete: Cascade)
+  createdBy      User             @relation(fields: [createdById], references: [id], onDelete: Cascade)
+  responses      FamilyResponse[]
+
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  @@index([familyCircleId, isActive])
+  @@map("family_prompts")
+}
+
+model FamilyResponse {
+  id        String       @id @default(uuid())
+  promptId  String
+  authorId  String
+  text      String       @default("")
+  audioKey  String?
+
+  prompt    FamilyPrompt @relation(fields: [promptId], references: [id], onDelete: Cascade)
+  author    User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime     @default(now())
+
+  @@index([promptId])
+  @@index([authorId])
+  @@map("family_responses")
+}
+
+model GuardianConsent {
+  id                    String   @id @default(uuid())
+  childUserId           String   @unique
+  guardianUserId        String
+  status                String   @default("APPROVED") // PENDING, APPROVED, REVOKED
+  canPostWithoutApproval Boolean  @default(false)
+  allowMediaUploads     Boolean  @default(true)
+
+  child                 User     @relation("ChildConsent", fields: [childUserId], references: [id], onDelete: Cascade)
+  guardian              User     @relation("GuardianConsent", fields: [guardianUserId], references: [id], onDelete: Cascade)
+
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([guardianUserId])
+  @@map("guardian_consents")
+}
+
+enum FamilySide {
+  MATERNAL
+  PATERNAL
+  DIRECT
+  IN_LAW
+  UNSPECIFIED
+}
+
+model FamilyRelationshipEdge {
+  id               String      @id @default(uuid())
+  familyCircleId   String
+  fromUserId       String
+  toUserId         String
+  relationshipCode String
+  side             FamilySide  @default(UNSPECIFIED)
+
+  familyCircle     FamilyCircle @relation(fields: [familyCircleId], references: [id], onDelete: Cascade)
+  fromUser         User         @relation("RelFromUser", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUser           User         @relation("RelToUser", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  @@unique([familyCircleId, fromUserId, toUserId])
+  @@index([familyCircleId])
+  @@index([fromUserId])
+  @@index([toUserId])
+  @@map("family_relationship_edges")
+}
+
+model FamilyMemoryLink {
+  id             String       @id @default(uuid())
+  familyCircleId String
+  memoryId       String
+  linkedById     String
+  isPinned       Boolean      @default(false)
+  occurredAt     DateTime     @default(now())
+
+  familyCircle   FamilyCircle @relation(fields: [familyCircleId], references: [id], onDelete: Cascade)
+  memory         Memory       @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  linkedBy       User         @relation(fields: [linkedById], references: [id], onDelete: Cascade)
+
+  createdAt      DateTime     @default(now())
+
+  @@unique([familyCircleId, memoryId])
+  @@index([familyCircleId, occurredAt(sort: Desc)])
+  @@index([memoryId])
+  @@index([linkedById])
+  @@map("family_memory_links")
+}
+
+model MediaAsset {
+  id           String   @id @default(uuid())
+  memoryId     String
+  ownerId      String
+  storageKey   String
+  thumbnailKey String?
+  originalName String   @default("")
+  mimeType     String   @default("")
+  fileSize     Int      @default(0)
+  durationSec  Float?
+  orderIndex   Int      @default(0)
+
+  memory       Memory   @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  owner        User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  createdAt    DateTime @default(now())
+
+  @@index([memoryId, orderIndex])
+  @@index([ownerId])
+  @@map("media_assets")
 }
 
 model PostReaction {
