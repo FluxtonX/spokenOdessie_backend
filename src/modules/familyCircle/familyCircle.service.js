@@ -1,4 +1,5 @@
 const prisma = require("../../config/prisma");
+const { resolvePerspectiveRelationship, getDisplayLabel, normalizeRelationshipCode } = require("./relationshipResolver");
 const { createNotification } = require("../notifications/notification.service");
 const { serializeUser } = require("../../utils/serializer");
 const { serializeMemory } = require("../memories/memory.service");
@@ -101,7 +102,7 @@ const getFamilyCircle = async ({ currentUser, circleId }) => {
 };
 
 /**
- * Get family members for current user's circle
+ * Get family members for current user's circle with perspective relationship resolution
  */
 const getFamilyMembers = async ({ currentUser }) => {
   const circle = await getOrCreateFamilyCircle({ currentUser });
@@ -112,9 +113,26 @@ const getFamilyMembers = async ({ currentUser }) => {
     orderBy: { joinedAt: "asc" }
   });
 
+  const edges = await prisma.familyRelationshipEdge.findMany({
+    where: { familyCircleId: circle.id }
+  }).catch(() => []);
+
   const serializedMembers = await Promise.all(
     members.map(async (member) => {
       const user = await serializeUser(member.user);
+
+      const edge = edges.find(
+        (e) => (e.fromUserId === currentUser.id && e.toUserId === member.userId) ||
+               (e.fromUserId === member.userId && e.toUserId === currentUser.id)
+      );
+
+      const relResolved = resolvePerspectiveRelationship({
+        viewerId: currentUser.id,
+        targetId: member.userId,
+        edge,
+        directMemberRelationship: member.relationship,
+        targetGender: member.user?.gender
+      });
 
       // Dynamic count of family memories for this user
       const sharedCount = await prisma.memory.count({
@@ -130,7 +148,8 @@ const getFamilyMembers = async ({ currentUser }) => {
         email: user.email,
         avatar: user.photoURL || user.avatar || null,
         role: member.role,
-        relationship: member.relationship,
+        relationship: relResolved.displayLabel,
+        relationshipDetails: relResolved,
         isAdmin: member.role === "ADMIN",
         joinedAt: member.joinedAt,
         invitedBy: member.invitedBy,
@@ -717,6 +736,399 @@ const declineInvitation = async ({ currentUser, invitationId }) => {
   return { message: "Invitation declined" };
 };
 
+/**
+ * Non-destructive linking of an individual memory to a Family Circle
+ */
+const linkMemoryToFamilyCircle = async ({ currentUser, familyCircleId, memoryId }) => {
+  const memory = await prisma.memory.findUnique({
+    where: { id: memoryId }
+  });
+  if (!memory) {
+    const error = new Error("Memory not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const member = await prisma.familyMember.findFirst({
+    where: { familyCircleId, userId: currentUser.id, status: "ACTIVE" }
+  });
+  if (!member) {
+    const error = new Error("Not authorized. You are not an active member of this Family Space.");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  const link = await prisma.familyMemoryLink.upsert({
+    where: {
+      familyCircleId_memoryId: {
+        familyCircleId,
+        memoryId
+      }
+    },
+    create: {
+      familyCircleId,
+      memoryId,
+      linkedById: currentUser.id,
+      occurredAt: memory.occurredAt || new Date()
+    },
+    update: {}
+  });
+
+  return link;
+};
+
+/**
+ * Remove link reference ONLY (never deletes original Memory or S3 file)
+ */
+const unlinkMemoryFromFamilyCircle = async ({ currentUser, familyCircleId, memoryId }) => {
+  const link = await prisma.familyMemoryLink.findUnique({
+    where: {
+      familyCircleId_memoryId: {
+        familyCircleId,
+        memoryId
+      }
+    }
+  });
+
+  if (!link) {
+    const error = new Error("Link not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const member = await prisma.familyMember.findFirst({
+    where: { familyCircleId, userId: currentUser.id, status: "ACTIVE" }
+  });
+
+  const isLinker = link.linkedById === currentUser.id;
+  const isAdmin = member?.role === "ADMIN";
+
+  if (!isLinker && !isAdmin) {
+    const error = new Error("Not authorized to unlink this memory");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  await prisma.familyMemoryLink.delete({
+    where: { id: link.id }
+  });
+
+  return { message: "Memory unlinked successfully from Family Space" };
+};
+
+/**
+ * Cursor-paginated timeline query for Family Space
+ */
+const getFamilyCircleTimeline = async ({ currentUser, familyCircleId, limit = 20, cursor }) => {
+  const member = await prisma.familyMember.findFirst({
+    where: { familyCircleId, userId: currentUser.id, status: "ACTIVE" }
+  });
+
+  if (!member) {
+    const error = new Error("Not authorized to view this timeline");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  const queryLimit = Math.min(Number(limit) || 20, 50);
+
+  const links = await prisma.familyMemoryLink.findMany({
+    where: { familyCircleId },
+    take: queryLimit + 1,
+    cursor: cursor ? { id: cursor } : undefined,
+    skip: cursor ? 1 : 0,
+    orderBy: { occurredAt: "desc" },
+    include: {
+      memory: {
+        include: {
+          mediaAssets: { orderBy: { orderIndex: "asc" } },
+          owner: true
+        }
+      },
+      linkedBy: true
+    }
+  });
+
+  let nextCursor = null;
+  if (links.length > queryLimit) {
+    const nextItem = links.pop();
+    nextCursor = nextItem.id;
+  }
+
+  const items = await Promise.all(
+    links.map(async (link) => {
+      const memory = await serializeMemory(link.memory, currentUser);
+      const linker = await serializeUser(link.linkedBy);
+      return {
+        linkId: link.id,
+        isPinned: link.isPinned,
+        linkedAt: link.createdAt,
+        linkedBy: linker,
+        memory
+      };
+    })
+  );
+
+  return {
+    items,
+    nextCursor,
+    hasMore: !!nextCursor
+  };
+};
+
+/**
+ * Story Layers (Multi-perspective contributions to a memory)
+ */
+const addStoryLayer = async ({ currentUser, memoryId, text, audioKey, audioDuration }) => {
+  const memory = await prisma.memory.findUnique({ where: { id: memoryId } });
+  if (!memory) {
+    const error = new Error("Memory not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const storyLayer = await prisma.storyLayer.create({
+    data: {
+      memoryId,
+      authorId: currentUser.id,
+      text: text || "",
+      audioKey: audioKey || null,
+      audioDuration: audioDuration ? Number(audioDuration) : null,
+    },
+    include: { author: true },
+  });
+
+  const author = await serializeUser(storyLayer.author);
+  return { ...storyLayer, author };
+};
+
+const getStoryLayers = async ({ memoryId }) => {
+  const layers = await prisma.storyLayer.findMany({
+    where: { memoryId },
+    include: { author: true },
+    orderBy: { createdAt: "asc" },
+  });
+
+  return Promise.all(
+    layers.map(async (layer) => {
+      const author = await serializeUser(layer.author);
+      return { ...layer, author };
+    })
+  );
+};
+
+/**
+ * Ask the Family Prompts Engine
+ */
+const createFamilyPrompt = async ({ currentUser, familyCircleId, question, category }) => {
+  const prompt = await prisma.familyPrompt.create({
+    data: {
+      familyCircleId,
+      createdById: currentUser.id,
+      question,
+      category: category || "Heritage",
+    },
+    include: {
+      createdBy: true,
+      responses: { include: { author: true } },
+    },
+  });
+
+  const createdBy = await serializeUser(prompt.createdBy);
+  return { ...prompt, createdBy };
+};
+
+const getFamilyPrompts = async ({ currentUser, familyCircleId }) => {
+  const prompts = await prisma.familyPrompt.findMany({
+    where: { familyCircleId, isActive: true },
+    include: {
+      createdBy: true,
+      responses: {
+        include: { author: true },
+        orderBy: { createdAt: "asc" },
+      },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  return Promise.all(
+    prompts.map(async (p) => {
+      const createdBy = await serializeUser(p.createdBy);
+      const responses = await Promise.all(
+        p.responses.map(async (r) => {
+          const author = await serializeUser(r.author);
+          return { ...r, author };
+        })
+      );
+      return { ...p, createdBy, responses };
+    })
+  );
+};
+
+const respondToFamilyPrompt = async ({ currentUser, promptId, text, audioKey }) => {
+  const prompt = await prisma.familyPrompt.findUnique({ where: { id: promptId } });
+  if (!prompt) {
+    const error = new Error("Family prompt not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const response = await prisma.familyResponse.create({
+    data: {
+      promptId,
+      authorId: currentUser.id,
+      text: text || "",
+      audioKey: audioKey || null,
+    },
+    include: { author: true },
+  });
+
+  const author = await serializeUser(response.author);
+  return { ...response, author };
+};
+
+/**
+ * Guardian & Minor Controls (Phase 4)
+ */
+const getGuardianControls = async ({ currentUser, familyCircleId }) => {
+  const minorMembers = await prisma.familyMember.findMany({
+    where: {
+      familyCircleId,
+      role: "RESTRICTED_MINOR",
+    },
+    include: {
+      user: {
+        include: {
+          childConsents: true,
+        },
+      },
+    },
+  });
+
+  return Promise.all(
+    minorMembers.map(async (m) => {
+      const user = await serializeUser(m.user);
+      const consent = m.user.childConsents?.[0] || null;
+      return {
+        memberId: m.id,
+        user,
+        consent,
+      };
+    })
+  );
+};
+
+const updateGuardianConsent = async ({ currentUser, childUserId, status, canPostWithoutApproval, allowMediaUploads }) => {
+  const consent = await prisma.guardianConsent.upsert({
+    where: { childUserId },
+    create: {
+      childUserId,
+      guardianUserId: currentUser.id,
+      status: status || "APPROVED",
+      canPostWithoutApproval: canPostWithoutApproval !== undefined ? Boolean(canPostWithoutApproval) : false,
+      allowMediaUploads: allowMediaUploads !== undefined ? Boolean(allowMediaUploads) : true,
+    },
+    update: {
+      ...(status && { status }),
+      ...(canPostWithoutApproval !== undefined && { canPostWithoutApproval: Boolean(canPostWithoutApproval) }),
+      ...(allowMediaUploads !== undefined && { allowMediaUploads: Boolean(allowMediaUploads) }),
+    },
+  });
+
+  return consent;
+};
+
+const upsertRelationshipEdge = async ({ currentUser, familyCircleId, toUserId, relationshipCode, side }) => {
+  if (currentUser.id === toUserId) {
+    const error = new Error("Cannot create a relationship edge to yourself.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const normCode = normalizeRelationshipCode(relationshipCode);
+
+  // Validate contradictory edge (e.g. A -> FATHER -> B and B -> FATHER -> A)
+  const reverseEdge = await prisma.familyRelationshipEdge.findUnique({
+    where: {
+      familyCircleId_fromUserId_toUserId: {
+        familyCircleId,
+        fromUserId: toUserId,
+        toUserId: currentUser.id
+      }
+    }
+  }).catch(() => null);
+
+  if (reverseEdge && reverseEdge.relationshipCode === normCode && ["FATHER", "MOTHER", "PATERNAL_GRANDMOTHER", "MATERNAL_GRANDMOTHER", "PATERNAL_GRANDFATHER", "MATERNAL_GRANDFATHER", "SON", "DAUGHTER"].includes(normCode)) {
+    const error = new Error(`Contradictory relationship detected: Both users cannot be set as ${getDisplayLabel(normCode)} to each other.`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const edge = await prisma.familyRelationshipEdge.upsert({
+    where: {
+      familyCircleId_fromUserId_toUserId: {
+        familyCircleId,
+        fromUserId: currentUser.id,
+        toUserId
+      }
+    },
+    create: {
+      familyCircleId,
+      fromUserId: currentUser.id,
+      toUserId,
+      relationshipCode: normCode,
+      side: side || "UNSPECIFIED"
+    },
+    update: {
+      relationshipCode: normCode,
+      side: side || "UNSPECIFIED"
+    }
+  });
+
+  return {
+    ...edge,
+    displayLabel: getDisplayLabel(normCode)
+  };
+};
+
+const getRelationshipGraph = async ({ currentUser, familyCircleId }) => {
+  const members = await prisma.familyMember.findMany({
+    where: { familyCircleId },
+    include: { user: true }
+  });
+
+  const edges = await prisma.familyRelationshipEdge.findMany({
+    where: { familyCircleId }
+  });
+
+  const nodes = await Promise.all(
+    members.map(async (m) => {
+      const u = await serializeUser(m.user);
+      return {
+        id: u.id,
+        name: u.displayName || u.name || "Family Member",
+        email: u.email,
+        avatar: u.photoURL || u.avatar,
+        role: m.role
+      };
+    })
+  );
+
+  const resolvedEdges = edges.map((e) => ({
+    id: e.id,
+    fromUserId: e.fromUserId,
+    toUserId: e.toUserId,
+    relationshipCode: e.relationshipCode,
+    displayLabel: getDisplayLabel(e.relationshipCode),
+    side: e.side
+  }));
+
+  return {
+    nodes,
+    edges: resolvedEdges
+  };
+};
+
 module.exports = {
   getOrCreateFamilyCircle,
   getFamilyCircle,
@@ -729,5 +1141,17 @@ module.exports = {
   demoteFromAdmin,
   getPendingApprovals,
   approveInvitation,
-  declineInvitation
+  declineInvitation,
+  linkMemoryToFamilyCircle,
+  unlinkMemoryFromFamilyCircle,
+  getFamilyCircleTimeline,
+  addStoryLayer,
+  getStoryLayers,
+  createFamilyPrompt,
+  getFamilyPrompts,
+  respondToFamilyPrompt,
+  getGuardianControls,
+  updateGuardianConsent,
+  upsertRelationshipEdge,
+  getRelationshipGraph
 };
