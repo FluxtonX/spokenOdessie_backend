@@ -24,6 +24,7 @@ const createAlbum = async (req, res) => {
       title: req.body.title,
       subtitle: req.body.subtitle,
       privacy: req.body.privacy,
+      familyCircleId: req.body.familyCircleId,
       coverUrl: req.body.coverUrl,
       file: req.file,
     });
@@ -49,6 +50,7 @@ const updateAlbum = async (req, res) => {
       title: req.body.title,
       subtitle: req.body.subtitle,
       privacy: req.body.privacy,
+      familyCircleId: req.body.familyCircleId,
       coverUrl: req.body.coverUrl,
       file: req.file,
     });
@@ -86,6 +88,47 @@ const getAlbumDetails = async (req, res) => {
   }
 };
 
+const addMemoryToAlbum = async (req, res) => {
+  try {
+    const album = await albumService.addMemoryToAlbum({
+      currentUser: req.user,
+      albumId: req.params.id,
+      memoryId: req.body.memoryId,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: album,
+    });
+  } catch (error) {
+    console.error("Add Memory to Album Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to add memory to album",
+    });
+  }
+};
+
+const getFamilyCircleAlbums = async (req, res) => {
+  try {
+    const albums = await albumService.getFamilyCircleAlbums({
+      currentUser: req.user,
+      familyCircleId: req.params.familyCircleId,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: albums,
+    });
+  } catch (error) {
+    console.error("Get Family Circle Albums Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to fetch family circle albums",
+    });
+  }
+};
+
 const deleteAlbum = async (req, res) => {
   try {
     const result = await albumService.deleteAlbum({
@@ -111,5 +154,7 @@ module.exports = {
   createAlbum,
   updateAlbum,
   getAlbumDetails,
+  addMemoryToAlbum,
+  getFamilyCircleAlbums,
   deleteAlbum,
 };

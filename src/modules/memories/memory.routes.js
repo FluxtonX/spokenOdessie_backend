@@ -44,6 +44,8 @@ router.post("/", protect, upload.array("media", 10), controller.createMemory);
 router.post("/:id/interact", protect, controller.interactWithMemory);
 router.post("/:id/react", protect, controller.reactToMemory);
 router.post("/:id/share", protect, controller.shareMemory);
+router.get("/:memoryId/story-layers", optionalProtect, controller.getStoryLayers);
+router.post("/:memoryId/story-layers", protect, controller.addStoryLayer);
 router.patch("/:id", protect, upload.array("media", 10), controller.updateMemory);
 router.delete("/:id", protect, controller.deleteMemory);
 

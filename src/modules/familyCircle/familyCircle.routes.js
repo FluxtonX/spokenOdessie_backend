@@ -53,7 +53,11 @@ router.get("/members", protect, async (req, res) => {
 router.get("/shared-memories", protect, async (req, res) => {
   try {
     const memories = await familyCircleService.getFamilySharedMemories({
-      currentUser: req.user
+      currentUser: req.user,
+      targetUserId: req.query.userId,
+      type: req.query.type,
+      searchQuery: req.query.search,
+      sort: req.query.sort,
     });
     res.json({
       success: true,
@@ -386,12 +390,14 @@ router.post(
   async (req, res) => {
     try {
       const { familyCircleId } = req.params;
-      const { question, category } = req.body;
+      const { question, category, audioKey, audioUrl } = req.body;
       const prompt = await familyCircleService.createFamilyPrompt({
         currentUser: req.user,
         familyCircleId,
         question,
         category,
+        audioKey,
+        audioUrl,
       });
       res.json({ success: true, data: prompt });
     } catch (error) {
@@ -427,12 +433,13 @@ router.get(
 router.post("/prompts/:promptId/respond", protect, async (req, res) => {
   try {
     const { promptId } = req.params;
-    const { text, audioKey } = req.body;
+    const { text, audioKey, audioUrl } = req.body;
     const response = await familyCircleService.respondToFamilyPrompt({
       currentUser: req.user,
       promptId,
       text,
       audioKey,
+      audioUrl,
     });
     res.json({ success: true, data: response });
   } catch (error) {

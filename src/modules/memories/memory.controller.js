@@ -270,6 +270,41 @@ const getFamilySharedMemories = async (req, res) => {
   }
 };
 
+const addStoryLayer = async (req, res) => {
+  try {
+    const { memoryId } = req.params;
+    const { text, audioKey, audioUrl } = req.body;
+    const layer = await memoryService.addMemoryStoryLayer({
+      user: req.user,
+      memoryId,
+      text,
+      audioKey,
+      audioUrl,
+    });
+    res.status(201).json({ success: true, data: layer });
+  } catch (error) {
+    console.error("Add Story Layer Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to add story layer",
+    });
+  }
+};
+
+const getStoryLayers = async (req, res) => {
+  try {
+    const { memoryId } = req.params;
+    const layers = await memoryService.getMemoryStoryLayers({ memoryId });
+    res.status(200).json({ success: true, data: layers });
+  } catch (error) {
+    console.error("Get Story Layers Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to fetch story layers",
+    });
+  }
+};
+
 module.exports = {
   getMemories,
   createMemory,
@@ -282,4 +317,6 @@ module.exports = {
   shareMemory,
   getDiscoveryMemories,
   getFamilySharedMemories,
+  addStoryLayer,
+  getStoryLayers,
 };

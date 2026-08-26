@@ -83,6 +83,7 @@ model User {
   guardianConsents      GuardianConsent[]  @relation("GuardianConsent")
   relFromEdges          FamilyRelationshipEdge[] @relation("RelFromUser")
   relToEdges            FamilyRelationshipEdge[] @relation("RelToUser")
+  albumContributions    AlbumContributor[]
 
   // Notifications
   notifications         Notification[]
@@ -196,6 +197,7 @@ model FamilyCircle {
   memoryLinks FamilyMemoryLink[]
   prompts     FamilyPrompt[]
   relationshipEdges FamilyRelationshipEdge[]
+  albums      Album[]
 }
 
 model FamilyMember {
@@ -264,15 +266,35 @@ model Album {
   privacy          String   @default("Private")
   entries          Int      @default(0)
   
+  familyCircleId   String?
+  familyCircle     FamilyCircle? @relation(fields: [familyCircleId], references: [id], onDelete: SetNull)
+
   ownerId          String
   owner            User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
 
   memories         Memory[]
+  contributors     AlbumContributor[]
+
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
   @@index([ownerId])
+  @@index([familyCircleId])
   @@index([privacy])
+}
+
+model AlbumContributor {
+  id            String       @id @default(uuid())
+  albumId       String
+  album         Album        @relation(fields: [albumId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role          String       @default("CONTRIBUTOR") // CREATOR | CONTRIBUTOR
+  joinedAt      DateTime     @default(now())
+
+  @@unique([albumId, userId])
+  @@index([albumId])
+  @@index([userId])
 }
 
 model Memory {
@@ -351,6 +373,7 @@ model FamilyPrompt {
   familyCircleId String
   createdById    String
   question       String
+  audioKey       String?
   category       String           @default("Heritage")
   isActive       Boolean          @default(true)
 

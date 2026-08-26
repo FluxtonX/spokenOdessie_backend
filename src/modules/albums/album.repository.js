@@ -23,6 +23,7 @@ const create = (payload) =>
       subtitle: payload.subtitle || "",
       privacy: payload.privacy || "Private",
       coverImageKey: payload.coverImageKey || null,
+      familyCircleId: payload.familyCircleId || null,
       entries: 0,
     },
   });

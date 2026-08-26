@@ -75,7 +75,7 @@ const getSignedFileUrl = async (key) => {
     return null;
   }
 
-  if (key.startsWith("http://") || key.startsWith("https://")) {
+  if (key.startsWith("http://") || key.startsWith("https://") || key.startsWith("data:")) {
     return key;
   }
 
