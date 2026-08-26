@@ -22,8 +22,10 @@ const upload = multer({
 });
 
 router.get("/", optionalProtect, controller.getAlbums);
+router.get("/space/:familyCircleId", protect, controller.getFamilyCircleAlbums);
 router.get("/:id", protect, controller.getAlbumDetails);
 router.post("/", protect, upload.single("coverImage"), controller.createAlbum);
+router.post("/:id/memories", protect, controller.addMemoryToAlbum);
 router.patch("/:id", protect, upload.single("coverImage"), controller.updateAlbum);
 router.delete("/:id", protect, controller.deleteAlbum);
 
