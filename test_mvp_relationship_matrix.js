@@ -215,6 +215,61 @@ async function runMvpRelationshipMatrixTest() {
     }
     assert(selfError !== null && selfError.statusCode === 400, "Self relationship edge rejected with 400 Bad Request");
 
+    // TEST MATRIX 8: Multi-Hop Traversal (Wilayat <-> Mudassir <-> Ali)
+    console.log("\n--- TEST MATRIX 8: Multi-Hop Traversal (Wilayat <-> Mudassir <-> Ali) ---");
+    const cousinUser = await prisma.user.upsert({
+      where: { email: "test_ali_cousin@odyssey.com" },
+      create: { email: "test_ali_cousin@odyssey.com", displayName: "Ali Cousin", role: "USER" },
+      update: {}
+    });
+    cousinUser.gender = "MALE";
+
+    let cousinMember = await prisma.familyMember.findFirst({
+      where: { familyCircleId: circle.id, userId: cousinUser.id }
+    });
+    if (!cousinMember) {
+      await prisma.familyMember.create({
+        data: {
+          familyCircleId: circle.id,
+          userId: cousinUser.id,
+          role: "CONTRIBUTOR",
+          relationship: "Cousin"
+        }
+      });
+    }
+
+    // 1. Mudassir (sonUser) sets Wilayat (fatherUser) as FATHER
+    await familyService.upsertRelationshipEdge({
+      currentUser: sonUser,
+      familyCircleId: circle.id,
+      toUserId: fatherUser.id,
+      relationshipCode: "FATHER"
+    });
+
+    // 2. Mudassir (sonUser) sets Ali (cousinUser) as COUSIN
+    await familyService.upsertRelationshipEdge({
+      currentUser: sonUser,
+      familyCircleId: circle.id,
+      toUserId: cousinUser.id,
+      relationshipCode: "COUSIN"
+    });
+
+    // Test Multi-Hop Inference: Wilayat (Father) viewing Ali (Cousin) without a direct edge
+    const wilayatViewsAli = await familyService.getRelationshipGraph({
+      currentUser: fatherUser,
+      familyCircleId: circle.id
+    });
+    const aliNodeForWilayat = wilayatViewsAli.nodes.find(n => n.userId === cousinUser.id);
+    assert(aliNodeForWilayat && (aliNodeForWilayat.displayLabel.includes("Nephew") || aliNodeForWilayat.relationshipCode === "NEPHEW" || aliNodeForWilayat.relationshipCode === "NIBLING"), `Wilayat (Father) views Ali (Son's Cousin) via Graph -> Inferred Label: '${aliNodeForWilayat?.displayLabel}' (Expected: 'Nephew' or 'Nephew / Niece')`);
+
+    // Test Multi-Hop Inference: Ali (Cousin) viewing Wilayat (Father) without a direct edge
+    const aliViewsWilayat = await familyService.getRelationshipGraph({
+      currentUser: cousinUser,
+      familyCircleId: circle.id
+    });
+    const wilayatNodeForAli = aliViewsWilayat.nodes.find(n => n.userId === fatherUser.id);
+    assert(wilayatNodeForAli && (wilayatNodeForAli.displayLabel === "Paternal Uncle" || wilayatNodeForAli.displayLabel === "Uncle" || wilayatNodeForAli.relationshipCode === "PATERNAL_UNCLE" || wilayatNodeForAli.relationshipCode === "UNCLE"), `Ali (Cousin) views Wilayat (Cousin's Father) via Graph -> Inferred Label: '${wilayatNodeForAli?.displayLabel}' (Expected: 'Paternal Uncle' or 'Uncle')`);
+
   } catch (err) {
     console.error("Test Error:", err);
     failed++;

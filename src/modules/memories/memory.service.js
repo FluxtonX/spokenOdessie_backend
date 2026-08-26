@@ -155,16 +155,22 @@ const serializeMemory = async (memoryDoc, currentUser = null) => {
   const taggedIds = Array.isArray(memory.taggedUserIds) ? memory.taggedUserIds : [];
   if (taggedIds.length > 0) {
     try {
-      const taggedDocs = await prisma.user.findMany({
-        where: {
-          OR: [
-            { id: { in: taggedIds } },
-            { googleId: { in: taggedIds } },
-            { email: { in: taggedIds } }
-          ]
-        },
-        select: { id: true, googleId: true, email: true, displayName: true, photoURL: true, photoKey: true, profession: true }
-      });
+      const [taggedDocs, taggedMembers] = await Promise.all([
+        prisma.user.findMany({
+          where: {
+            OR: [
+              { id: { in: taggedIds } },
+              { googleId: { in: taggedIds } },
+              { email: { in: taggedIds } }
+            ]
+          },
+          select: { id: true, googleId: true, email: true, displayName: true, photoURL: true, photoKey: true, profession: true }
+        }),
+        prisma.familyMember.findMany({
+          where: { id: { in: taggedIds } },
+          include: { user: true }
+        })
+      ]);
 
       const docsMap = new Map();
       taggedDocs.forEach(doc => {
@@ -173,23 +179,43 @@ const serializeMemory = async (memoryDoc, currentUser = null) => {
         if (doc.email) docsMap.set(doc.email.toLowerCase(), doc);
       });
 
+      taggedMembers.forEach(fm => {
+        if (fm.id && fm.user) {
+          docsMap.set(fm.id, {
+            id: fm.user.id,
+            displayName: fm.user.displayName || fm.user.email?.split("@")[0] || "Family Member",
+            photoURL: fm.user.photoURL,
+            photoKey: fm.user.photoKey,
+            profession: fm.relationship || fm.user.profession || "Family Member"
+          });
+        }
+      });
+
       taggedUsers = await Promise.all(taggedIds.map(async (tid) => {
         const u = docsMap.get(tid) || docsMap.get(String(tid).toLowerCase());
         if (u) {
+          let avatarUrl = u.photoURL || "";
+          if (!avatarUrl && u.photoKey) {
+            avatarUrl = await getSignedFileUrl(u.photoKey).catch(() => "");
+          }
+          const displayName = u.displayName || (u.email ? u.email.split("@")[0] : "Family Member");
+          if (!avatarUrl) {
+            avatarUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName)}&background=4A3AFF&color=fff`;
+          }
           return {
             id: u.id || tid,
-            name: u.displayName || "Family Member",
-            displayName: u.displayName || "Family Member",
-            profession: u.profession || "",
-            avatar: u.photoKey ? await getSignedFileUrl(u.photoKey) : (u.photoURL || "")
+            name: displayName,
+            displayName,
+            profession: u.profession || "Family Member",
+            avatar: avatarUrl
           };
         }
         return {
           id: String(tid),
           name: "Family Member",
           displayName: "Family Member",
-          profession: "",
-          avatar: ""
+          profession: "Family Circle",
+          avatar: `https://ui-avatars.com/api/?name=Family+Member&background=4A3AFF&color=fff`
         };
       }));
     } catch (_) {}
@@ -1420,6 +1446,51 @@ const getDiscoveryMemories = async ({ user, filter = "public", theme, q, page = 
   };
 };
 
+/**
+ * Multi-Contributor Story Layers Engine
+ */
+const addMemoryStoryLayer = async ({ user, memoryId, text, audioKey, audioUrl }) => {
+  const memory = await prisma.memory.findUnique({ where: { id: memoryId } });
+  if (!memory) {
+    const error = new Error("Memory not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const effectiveKey = audioKey || audioUrl || null;
+
+  const layer = await prisma.storyLayer.create({
+    data: {
+      memoryId,
+      authorId: user.id,
+      text: text || "Voice Story Layer",
+      audioKey: effectiveKey,
+    },
+    include: { author: true },
+  });
+
+  const author = await serializeUser(layer.author);
+  let finalAudioUrl = layer.audioKey ? await getSignedFileUrl(layer.audioKey) : audioUrl;
+
+  return { ...layer, author, audioUrl: finalAudioUrl };
+};
+
+const getMemoryStoryLayers = async ({ memoryId }) => {
+  const layers = await prisma.storyLayer.findMany({
+    where: { memoryId },
+    include: { author: true },
+    orderBy: { createdAt: "asc" },
+  });
+
+  return Promise.all(
+    layers.map(async (layer) => {
+      const author = await serializeUser(layer.author);
+      let audioUrl = layer.audioKey ? await getSignedFileUrl(layer.audioKey) : null;
+      return { ...layer, author, audioUrl };
+    })
+  );
+};
+
 module.exports = {
   serializeMemory,
   getMemoriesByUser,
@@ -1432,4 +1503,6 @@ module.exports = {
   reactToMemory,
   shareMemory,
   getDiscoveryMemories,
+  addMemoryStoryLayer,
+  getMemoryStoryLayers,
 };

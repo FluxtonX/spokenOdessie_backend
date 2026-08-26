@@ -1,8 +1,9 @@
 const prisma = require("../../config/prisma");
-const { resolvePerspectiveRelationship, getDisplayLabel, normalizeRelationshipCode } = require("./relationshipResolver");
+const { resolvePerspectiveRelationship, getDisplayLabel, normalizeRelationshipCode, inferMultiHopRelationship } = require("./relationshipResolver");
 const { createNotification } = require("../notifications/notification.service");
 const { serializeUser } = require("../../utils/serializer");
 const { serializeMemory } = require("../memories/memory.service");
+const { getSignedFileUrl } = require("../../services/s3.service");
 
 // Debug: Check if prisma is loaded
 console.log("Prisma client loaded in familyCircle.service:", !!prisma, typeof prisma);
@@ -164,7 +165,7 @@ const getFamilyMembers = async ({ currentUser }) => {
 /**
  * Get shared memories published by any connected member in user's family circle
  */
-const getFamilySharedMemories = async ({ currentUser }) => {
+const getFamilySharedMemories = async ({ currentUser, targetUserId, type, searchQuery, sort = "newest" }) => {
   const circle = await getOrCreateFamilyCircle({ currentUser });
 
   const members = await prisma.familyMember.findMany({
@@ -172,8 +173,8 @@ const getFamilySharedMemories = async ({ currentUser }) => {
     include: { user: true }
   });
 
-  const memberUserIds = new Set(members.map(m => m.userId));
-  const memberFirebaseUids = new Set(members.map(m => m.user?.firebaseUid).filter(Boolean));
+  const memberUserIds = new Set(members.map((m) => m.userId));
+  const memberFirebaseUids = new Set(members.map((m) => m.user?.firebaseUid).filter(Boolean));
 
   // Add current user ID & Firebase UID so user's own Family memories render in Shared Memories as well
   if (currentUser?.id) memberUserIds.add(currentUser.id);
@@ -190,7 +191,7 @@ const getFamilySharedMemories = async ({ currentUser }) => {
     include: { user1: true, user2: true }
   }).catch(() => []);
 
-  connections.forEach(c => {
+  connections.forEach((c) => {
     const otherUser = c.user1Id === currentUser.id ? c.user2 : c.user1;
     if (otherUser) {
       memberUserIds.add(otherUser.id);
@@ -199,35 +200,70 @@ const getFamilySharedMemories = async ({ currentUser }) => {
   });
 
   const relationshipMap = new Map();
-  members.forEach(m => {
+  members.forEach((m) => {
     const rel = m.relationship || m.role;
     relationshipMap.set(m.userId, rel === "Admin" || rel === "ADMIN" ? "Circle Creator" : rel);
   });
 
-  const memberIdList = Array.from(memberUserIds);
-  const memberUidList = Array.from(memberFirebaseUids);
+  let filterMemberIdList = Array.from(memberUserIds);
+  let filterMemberUidList = Array.from(memberFirebaseUids);
+
+  // If a specific targetUserId filter is selected
+  if (targetUserId && targetUserId !== "ALL") {
+    filterMemberIdList = [targetUserId];
+    const targetUser = members.find((m) => m.userId === targetUserId)?.user;
+    filterMemberUidList = targetUser?.firebaseUid ? [targetUser.firebaseUid] : [];
+  }
+
+  // Construct search AND conditions
+  const andConditions = [
+    {
+      OR: [
+        { privacy: { mode: "insensitive", contains: "family" } },
+        { privacy: { in: ["Family", "family", "Family Circle", "family circle", "Family Only", "family only", "Family-Only"] } }
+      ]
+    }
+  ];
+
+  // Media type filter
+  if (type && type !== "ALL") {
+    if (type.toLowerCase() === "milestone") {
+      andConditions.push({
+        OR: [
+          { type: { mode: "insensitive", equals: "milestone" } },
+          { tags: { has: "milestone" } }
+        ]
+      });
+    } else {
+      andConditions.push({
+        type: { mode: "insensitive", equals: type }
+      });
+    }
+  }
+
+  // Search keyword filter
+  if (searchQuery && searchQuery.trim()) {
+    const q = searchQuery.trim();
+    andConditions.push({
+      OR: [
+        { title: { mode: "insensitive", contains: q } },
+        { description: { mode: "insensitive", contains: q } },
+        { tags: { has: q.toLowerCase() } }
+      ]
+    });
+  }
+
+  const orderByDirection = sort === "oldest" ? "asc" : "desc";
 
   const memories = await prisma.memory.findMany({
     where: {
       OR: [
-        { ownerId: { in: memberIdList } },
-        ...(memberUidList.length > 0 ? [{ ownerFirebaseUid: { in: memberUidList } }] : [])
+        { ownerId: { in: filterMemberIdList } },
+        ...(filterMemberUidList.length > 0 ? [{ ownerFirebaseUid: { in: filterMemberUidList } }] : [])
       ],
-      AND: [
-        {
-          OR: [
-            { privacy: { mode: "insensitive", contains: "family" } },
-            { privacy: { in: ["Family", "family", "Family Circle", "family circle", "Family Only", "family only", "Family-Only"] } }
-          ]
-        },
-        {
-          NOT: {
-            privacy: { mode: "insensitive", equals: "public" }
-          }
-        }
-      ]
+      AND: andConditions
     },
-    orderBy: { occurredAt: "desc" }
+    orderBy: { occurredAt: orderByDirection }
   });
 
   const serialized = await Promise.all(
@@ -920,12 +956,15 @@ const getStoryLayers = async ({ memoryId }) => {
 /**
  * Ask the Family Prompts Engine
  */
-const createFamilyPrompt = async ({ currentUser, familyCircleId, question, category }) => {
+const createFamilyPrompt = async ({ currentUser, familyCircleId, question, category, audioKey, audioUrl }) => {
+  const effectiveKey = audioKey || audioUrl || null;
+
   const prompt = await prisma.familyPrompt.create({
     data: {
       familyCircleId,
       createdById: currentUser.id,
-      question,
+      question: question || "Voice Question",
+      audioKey: effectiveKey,
       category: category || "Heritage",
     },
     include: {
@@ -935,7 +974,9 @@ const createFamilyPrompt = async ({ currentUser, familyCircleId, question, categ
   });
 
   const createdBy = await serializeUser(prompt.createdBy);
-  return { ...prompt, createdBy };
+  let finalAudioUrl = prompt.audioKey ? await getSignedFileUrl(prompt.audioKey) : audioUrl;
+
+  return { ...prompt, createdBy, audioUrl: finalAudioUrl };
 };
 
 const getFamilyPrompts = async ({ currentUser, familyCircleId }) => {
@@ -954,18 +995,21 @@ const getFamilyPrompts = async ({ currentUser, familyCircleId }) => {
   return Promise.all(
     prompts.map(async (p) => {
       const createdBy = await serializeUser(p.createdBy);
+      let promptAudioUrl = p.audioKey ? await getSignedFileUrl(p.audioKey) : null;
+
       const responses = await Promise.all(
         p.responses.map(async (r) => {
           const author = await serializeUser(r.author);
-          return { ...r, author };
+          let audioUrl = r.audioKey ? await getSignedFileUrl(r.audioKey) : null;
+          return { ...r, author, audioUrl };
         })
       );
-      return { ...p, createdBy, responses };
+      return { ...p, createdBy, audioUrl: promptAudioUrl, responses };
     })
   );
 };
 
-const respondToFamilyPrompt = async ({ currentUser, promptId, text, audioKey }) => {
+const respondToFamilyPrompt = async ({ currentUser, promptId, text, audioKey, audioUrl }) => {
   const prompt = await prisma.familyPrompt.findUnique({ where: { id: promptId } });
   if (!prompt) {
     const error = new Error("Family prompt not found");
@@ -973,18 +1017,22 @@ const respondToFamilyPrompt = async ({ currentUser, promptId, text, audioKey }) 
     throw error;
   }
 
+  const effectiveKey = audioKey || audioUrl || null;
+
   const response = await prisma.familyResponse.create({
     data: {
       promptId,
       authorId: currentUser.id,
-      text: text || "",
-      audioKey: audioKey || null,
+      text: text || "Voice Answer",
+      audioKey: effectiveKey,
     },
     include: { author: true },
   });
 
   const author = await serializeUser(response.author);
-  return { ...response, author };
+  let finalAudioUrl = response.audioKey ? await getSignedFileUrl(response.audioKey) : audioUrl;
+
+  return { ...response, author, audioUrl: finalAudioUrl };
 };
 
 /**
@@ -1091,6 +1139,57 @@ const upsertRelationshipEdge = async ({ currentUser, familyCircleId, toUserId, r
   };
 };
 
+function getGenerationalTier(code) {
+  switch (code) {
+    case "PATERNAL_GRANDMOTHER":
+    case "MATERNAL_GRANDMOTHER":
+    case "PATERNAL_GRANDFATHER":
+    case "MATERNAL_GRANDFATHER":
+    case "GRANDMOTHER":
+    case "GRANDFATHER":
+      return -2;
+
+    case "FATHER":
+    case "MOTHER":
+    case "PARENT":
+    case "PATERNAL_UNCLE":
+    case "MATERNAL_UNCLE":
+    case "PATERNAL_AUNT":
+    case "MATERNAL_AUNT":
+    case "UNCLE":
+    case "AUNT":
+      return -1;
+
+    case "SELF":
+    case "HUSBAND":
+    case "WIFE":
+    case "SPOUSE":
+    case "BROTHER":
+    case "SISTER":
+    case "SIBLING":
+    case "COUSIN":
+    case "PATERNAL_COUSIN":
+    case "MATERNAL_COUSIN":
+      return 0;
+
+    case "SON":
+    case "DAUGHTER":
+    case "CHILD":
+    case "NEPHEW":
+    case "NIECE":
+    case "NIBLING":
+      return 1;
+
+    case "GRANDSON":
+    case "GRANDDAUGHTER":
+    case "GRANDCHILD":
+      return 2;
+
+    default:
+      return 99;
+  }
+}
+
 const getRelationshipGraph = async ({ currentUser, familyCircleId }) => {
   const members = await prisma.familyMember.findMany({
     where: { familyCircleId },
@@ -1104,12 +1203,47 @@ const getRelationshipGraph = async ({ currentUser, familyCircleId }) => {
   const nodes = await Promise.all(
     members.map(async (m) => {
       const u = await serializeUser(m.user);
+
+      const edge = edges.find(
+        (e) => (e.fromUserId === currentUser.id && e.toUserId === m.userId) ||
+               (e.fromUserId === m.userId && e.toUserId === currentUser.id)
+      );
+
+      let relResolved = resolvePerspectiveRelationship({
+        viewerId: currentUser.id,
+        targetId: m.userId,
+        edge,
+        directMemberRelationship: m.relationship,
+        targetGender: m.user?.gender
+      });
+
+      // If no direct edge exists, attempt multi-hop graph inference
+      if (!edge && m.userId !== currentUser.id) {
+        const inferred = inferMultiHopRelationship({
+          viewerId: currentUser.id,
+          targetId: m.userId,
+          edges,
+          targetGender: m.user?.gender
+        });
+        if (inferred) {
+          relResolved = inferred;
+        }
+      }
+
+      const tier = relResolved.isSelf ? 0 : getGenerationalTier(relResolved.code);
+
       return {
         id: u.id,
+        userId: m.userId,
         name: u.displayName || u.name || "Family Member",
         email: u.email,
         avatar: u.photoURL || u.avatar,
-        role: m.role
+        role: m.role,
+        relationshipCode: relResolved.code,
+        displayLabel: relResolved.displayLabel,
+        side: relResolved.side,
+        isSelf: Boolean(relResolved.isSelf),
+        tier
       };
     })
   );

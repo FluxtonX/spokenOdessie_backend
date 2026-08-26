@@ -198,11 +198,142 @@ function resolvePerspectiveRelationship({ viewerId, targetId, edge, directMember
   };
 }
 
+// 2-Hop Composition Inference Matrix
+const TWO_HOP_COMPOSITION = {
+  // Viewer -> SON/DAUGHTER (B) -> COUSIN (C) ==> NEPHEW / NIECE
+  "SON+COUSIN": { MALE: "NEPHEW", FEMALE: "NIECE", DEFAULT: "NIBLING" },
+  "DAUGHTER+COUSIN": { MALE: "NEPHEW", FEMALE: "NIECE", DEFAULT: "NIBLING" },
+  "CHILD+COUSIN": { MALE: "NEPHEW", FEMALE: "NIECE", DEFAULT: "NIBLING" },
+
+  // Viewer -> COUSIN (B) -> FATHER/MOTHER (C) ==> UNCLE / AUNT
+  "COUSIN+FATHER": { MALE: "PATERNAL_UNCLE", FEMALE: "PATERNAL_AUNT", DEFAULT: "UNCLE" },
+  "COUSIN+MOTHER": { MALE: "MATERNAL_UNCLE", FEMALE: "MATERNAL_AUNT", DEFAULT: "AUNT" },
+  "COUSIN+PARENT": { MALE: "UNCLE", FEMALE: "AUNT", DEFAULT: "UNCLE" },
+
+  // Viewer -> FATHER (B) -> BROTHER/SISTER (C) ==> UNCLE / AUNT
+  "FATHER+BROTHER": { DEFAULT: "PATERNAL_UNCLE" },
+  "FATHER+SISTER": { DEFAULT: "PATERNAL_AUNT" },
+  "FATHER+SIBLING": { MALE: "PATERNAL_UNCLE", FEMALE: "PATERNAL_AUNT", DEFAULT: "UNCLE" },
+
+  // Viewer -> MOTHER (B) -> BROTHER/SISTER (C) ==> UNCLE / AUNT
+  "MOTHER+BROTHER": { DEFAULT: "MATERNAL_UNCLE" },
+  "MOTHER+SISTER": { DEFAULT: "MATERNAL_AUNT" },
+  "MOTHER+SIBLING": { MALE: "MATERNAL_UNCLE", FEMALE: "MATERNAL_AUNT", DEFAULT: "AUNT" },
+
+  // Viewer -> BROTHER/SISTER (B) -> SON/DAUGHTER (C) ==> NEPHEW / NIECE
+  "BROTHER+SON": { DEFAULT: "NEPHEW" },
+  "BROTHER+DAUGHTER": { DEFAULT: "NIECE" },
+  "BROTHER+CHILD": { MALE: "NEPHEW", FEMALE: "NIECE", DEFAULT: "NIBLING" },
+  "SISTER+SON": { DEFAULT: "NEPHEW" },
+  "SISTER+DAUGHTER": { DEFAULT: "NIECE" },
+  "SISTER+CHILD": { MALE: "NEPHEW", FEMALE: "NIECE", DEFAULT: "NIBLING" },
+
+  // Viewer -> FATHER/MOTHER (B) -> FATHER/MOTHER (C) ==> GRANDFATHER / GRANDMOTHER
+  "FATHER+FATHER": { DEFAULT: "PATERNAL_GRANDFATHER" },
+  "FATHER+MOTHER": { DEFAULT: "PATERNAL_GRANDMOTHER" },
+  "MOTHER+FATHER": { DEFAULT: "MATERNAL_GRANDFATHER" },
+  "MOTHER+MOTHER": { DEFAULT: "MATERNAL_GRANDMOTHER" },
+
+  // Viewer -> UNCLE/AUNT (B) -> SON/DAUGHTER (C) ==> COUSIN
+  "PATERNAL_UNCLE+SON": { DEFAULT: "PATERNAL_COUSIN" },
+  "PATERNAL_UNCLE+DAUGHTER": { DEFAULT: "PATERNAL_COUSIN" },
+  "PATERNAL_UNCLE+CHILD": { DEFAULT: "PATERNAL_COUSIN" },
+  "MATERNAL_UNCLE+SON": { DEFAULT: "MATERNAL_COUSIN" },
+  "MATERNAL_UNCLE+DAUGHTER": { DEFAULT: "MATERNAL_COUSIN" },
+  "MATERNAL_UNCLE+CHILD": { DEFAULT: "MATERNAL_COUSIN" },
+  "PATERNAL_AUNT+SON": { DEFAULT: "PATERNAL_COUSIN" },
+  "PATERNAL_AUNT+DAUGHTER": { DEFAULT: "PATERNAL_COUSIN" },
+  "MATERNAL_AUNT+SON": { DEFAULT: "MATERNAL_COUSIN" },
+  "MATERNAL_AUNT+DAUGHTER": { DEFAULT: "MATERNAL_COUSIN" },
+
+  // Viewer -> BROTHER/SISTER (B) -> BROTHER/SISTER (C) ==> BROTHER / SISTER
+  "BROTHER+BROTHER": { DEFAULT: "BROTHER" },
+  "BROTHER+SISTER": { DEFAULT: "SISTER" },
+  "SISTER+BROTHER": { DEFAULT: "BROTHER" },
+  "SISTER+SISTER": { DEFAULT: "SISTER" }
+};
+
+/**
+ * Multi-Hop Graph Traversal Engine
+ * Infers relationship between viewerId and targetId across intermediate graph nodes (e.g. 2-hop paths)
+ */
+function inferMultiHopRelationship({ viewerId, targetId, edges = [], targetGender = null }) {
+  if (!viewerId || !targetId || viewerId === targetId || !edges || edges.length === 0) return null;
+
+  // 1. Direct edge check
+  const directEdge = edges.find(
+    (e) => (e.fromUserId === viewerId && e.toUserId === targetId) ||
+           (e.fromUserId === targetId && e.toUserId === viewerId)
+  );
+
+  if (directEdge) {
+    return resolvePerspectiveRelationship({
+      viewerId,
+      targetId,
+      edge: directEdge,
+      targetGender
+    });
+  }
+
+  // 2. 2-Hop Path Discovery: Viewer (A) -> Intermediate (B) -> Target (C)
+  const viewerEdges = edges.filter((e) => e.fromUserId === viewerId || e.toUserId === viewerId);
+
+  for (const edge1 of viewerEdges) {
+    const intermediateId = edge1.fromUserId === viewerId ? edge1.toUserId : edge1.fromUserId;
+    if (intermediateId === targetId) continue;
+
+    // Find edge between intermediateId (B) and targetId (C)
+    const edge2 = edges.find(
+      (e) => (e.fromUserId === intermediateId && e.toUserId === targetId) ||
+             (e.fromUserId === targetId && e.toUserId === intermediateId)
+    );
+
+    if (edge2) {
+      // Resolve relation R1 (B to Viewer)
+      const rel1 = resolvePerspectiveRelationship({
+        viewerId,
+        targetId: intermediateId,
+        edge: edge1
+      });
+
+      // Resolve relation R2 (Target to Intermediate)
+      const rel2 = resolvePerspectiveRelationship({
+        viewerId: intermediateId,
+        targetId,
+        edge: edge2,
+        targetGender
+      });
+
+      const key = `${rel1.code}+${rel2.code}`;
+      const compositionRule = TWO_HOP_COMPOSITION[key];
+
+      if (compositionRule) {
+        const genderKey = (targetGender || "").toUpperCase();
+        let code = compositionRule.DEFAULT;
+        if (genderKey === "MALE" || genderKey === "MAN") code = compositionRule.MALE || compositionRule.DEFAULT;
+        if (genderKey === "FEMALE" || genderKey === "WOMAN") code = compositionRule.FEMALE || compositionRule.DEFAULT;
+
+        return {
+          code,
+          displayLabel: getDisplayLabel(code),
+          side: RELATIONSHIP_DICTIONARY[code]?.defaultSide || "UNSPECIFIED",
+          inferred: true,
+          viaUserId: intermediateId
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
 module.exports = {
   RELATIONSHIP_DICTIONARY,
   INVERSE_MAPPING,
+  TWO_HOP_COMPOSITION,
   normalizeRelationshipCode,
   getInverseRelationshipCode,
   getDisplayLabel,
-  resolvePerspectiveRelationship
+  resolvePerspectiveRelationship,
+  inferMultiHopRelationship
 };
