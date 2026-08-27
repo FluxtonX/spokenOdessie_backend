@@ -5,6 +5,7 @@ const ffmpegPath = require("ffmpeg-static");
 const memoryRepository = require("./memory.repository");
 const prisma = require("../../config/prisma");
 const { uploadFileToS3, getSignedFileUrl } = require("../../services/s3.service");
+const { serializeUser } = require("../../utils/serializer");
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
@@ -221,12 +222,58 @@ const serializeMemory = async (memoryDoc, currentUser = null) => {
     } catch (_) {}
   }
 
+  const currentUserId = currentUser?.id || currentUser?.uid || currentUser?.sub;
+  let isOwner = false;
+  if (currentUserId && memory.ownerId) {
+    if (currentUserId === memory.ownerId) {
+      isOwner = true;
+    } else if (currentUser?.email && memory.ownerId === currentUser.email) {
+      isOwner = true;
+    } else if (currentUser?.googleId && memory.ownerId === currentUser.googleId) {
+      isOwner = true;
+    } else {
+      try {
+        const u = await prisma.user.findFirst({
+          where: {
+            OR: [
+              { id: currentUserId },
+              { googleId: currentUserId },
+              { email: currentUserId }
+            ]
+          }
+        });
+        if (u) {
+          const validOwnerTokens = [u.id, u.googleId, u.email].filter(Boolean);
+          if (validOwnerTokens.includes(memory.ownerId)) {
+            isOwner = true;
+          }
+        }
+      } catch (_) {}
+    }
+  }
+
+  const isLocked = Boolean(memory.isVaultLocked) && Boolean(memory.unlockAt) && new Date(memory.unlockAt) > new Date();
+
+  let isVaultReleased = false;
+  if (isLocked && !isOwner && memory.ownerId) {
+    try {
+      const settings = await prisma.legacySettings.findUnique({
+        where: { userId: memory.ownerId }
+      });
+      isVaultReleased = Boolean(settings?.isReleased);
+    } catch (_) {}
+  }
+
+  const isSealed = isLocked && !isOwner && !isVaultReleased;
+
   return {
     id: memory.id,
     ownerFirebaseUid: memory.ownerId || "",
     ownerId: memory.ownerId || "",
     title: memory.title,
-    description: memory.description || "",
+    description: isSealed 
+      ? `🔒 [Sealed in Time Capsule until ${new Date(memory.unlockAt).toLocaleDateString()}]` 
+      : (memory.description || ""),
     tags: Array.isArray(memory.tags) ? memory.tags : [],
     taggedUserIds: taggedIds,
     taggedUsers,
@@ -238,22 +285,25 @@ const serializeMemory = async (memoryDoc, currentUser = null) => {
     albumId: memory.albumId || null,
     albumTitle: memory.albumTitle || "",
     date: memory.occurredAt,
-    mediaKey: memory.mediaKey || null,
-    mediaMimeType: memory.mediaMimeType || "",
-    mediaOriginalName: memory.mediaOriginalName || "",
-    mediaUrl: await getSignedFileUrl(memory.mediaKey),
-    thumbnailUrl: await getSignedFileUrl(memory.thumbnailKey),
-    mediaList: mediaListWithUrls,
+    mediaKey: isSealed ? null : (memory.mediaKey || null),
+    mediaMimeType: isSealed ? "" : (memory.mediaMimeType || ""),
+    mediaOriginalName: isSealed ? "" : (memory.mediaOriginalName || ""),
+    mediaUrl: isSealed ? null : await getSignedFileUrl(memory.mediaKey),
+    thumbnailUrl: isSealed ? null : await getSignedFileUrl(memory.thumbnailKey),
+    mediaList: isSealed ? [] : mediaListWithUrls,
     likes: finalTotalReactions,
     totalReactions: finalTotalReactions,
     commentsCount: typeof memory.commentsCount === "number" ? memory.commentsCount : 0,
-    comments: Array.isArray(memory.comments) ? memory.comments : [],
+    comments: isSealed ? [] : (Array.isArray(memory.comments) ? memory.comments : []),
     shares: typeof memory.shares === "number" ? memory.shares : 0,
     reactions: reactionsCount,
     userReaction,
     color: memory.color || "",
     backgroundId: memory.backgroundId || "none",
     fontId: memory.fontId || "default",
+    isVaultLocked: Boolean(memory.isVaultLocked),
+    isLocked: isSealed,
+    unlockAt: memory.unlockAt || null,
     ownerDisplayName,
     ownerEmail,
     ownerProfession,
@@ -414,6 +464,8 @@ const createMemory = async ({
   mediaOriginalName,
   mediaList,
   taggedUserIds,
+  isVaultLocked,
+  unlockAt,
 }) => {
   const normalizedTitle = typeof title === "string" ? title.trim() : "";
   const normalizedDescription = typeof description === "string" ? description.trim() : "";
@@ -426,6 +478,26 @@ const createMemory = async ({
       const parsed = typeof taggedUserIds === "string" ? JSON.parse(taggedUserIds) : taggedUserIds;
       if (Array.isArray(parsed)) normalizedTaggedUserIds = parsed.map(String).filter(Boolean);
     } catch (_) {}
+  }
+
+  let finalUnlockAt = null;
+  const isCapsule = Boolean(isVaultLocked || unlockAt);
+  if (unlockAt) {
+    const parsedDate = new Date(unlockAt);
+    if (!isNaN(parsedDate.getTime())) {
+      finalUnlockAt = parsedDate;
+    }
+  }
+
+  if (isCapsule && !finalUnlockAt) {
+    // Default unlockAt to 1 year if not provided
+    finalUnlockAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
+  }
+
+  if (isCapsule && finalUnlockAt && finalUnlockAt <= new Date()) {
+    const error = new Error("Time capsule unlock date must be in the future.");
+    error.statusCode = 400;
+    throw error;
   }
 
   if (!normalizedTitle) {
@@ -517,10 +589,11 @@ const createMemory = async ({
     thumbnailKey: uploadedMediaList[0]?.thumbnailKey || null,
     mediaOriginalName: uploadedMediaList[0]?.mediaOriginalName || "",
     mediaMimeType: uploadedMediaList[0]?.mediaMimeType || "",
-    mediaList: uploadedMediaList,
     color: typeof color === "string" ? color.trim() : "",
     backgroundId: typeof backgroundId === "string" ? backgroundId.trim() : "none",
     fontId: typeof fontId === "string" ? fontId.trim() : "default",
+    isVaultLocked: isCapsule,
+    unlockAt: finalUnlockAt,
   });
 
   const serializedMemory = await serializeMemory(memory, user);
@@ -967,7 +1040,20 @@ const interactWithMemory = async ({ user, memoryId, type }) => {
   return { success: true };
 };
 
-const getMemoryDetails = async ({ currentUser, memoryId }) => {
+const getMemoryDetails = async (arg1, arg2) => {
+  let currentUser = null;
+  let memoryId = null;
+
+  if (typeof arg1 === "string") {
+    memoryId = arg1;
+    currentUser = arg2 || null;
+  } else if (arg1 && typeof arg1 === "object") {
+    if (arg1.memoryId || arg1.id) {
+      memoryId = arg1.memoryId || arg1.id;
+      currentUser = arg1.currentUser || arg2 || null;
+    }
+  }
+
   let memory = null;
   
   if (memoryId) {
@@ -1000,9 +1086,60 @@ const getMemoryDetails = async ({ currentUser, memoryId }) => {
   }
 
   const currentUserId = currentUser?.id || currentUser?.uid || currentUser?.sub;
+  let isOwner = false;
+  if (currentUserId && memory.ownerId) {
+    if (currentUserId === memory.ownerId) {
+      isOwner = true;
+    } else if (currentUser?.email && memory.ownerId === currentUser.email) {
+      isOwner = true;
+    } else if (currentUser?.googleId && memory.ownerId === currentUser.googleId) {
+      isOwner = true;
+    } else {
+      try {
+        const u = await prisma.user.findFirst({
+          where: {
+            OR: [
+              { id: currentUserId },
+              { googleId: currentUserId },
+              { email: currentUserId }
+            ]
+          }
+        });
+        if (u) {
+          const validOwnerTokens = [u.id, u.googleId, u.email].filter(Boolean);
+          if (validOwnerTokens.includes(memory.ownerId)) {
+            isOwner = true;
+          }
+        }
+      } catch (_) {}
+    }
+  }
+
+  // Server-side Time-Capsule Lock Enforcement (Phases 6 & 8)
+  const isLocked = Boolean(memory.isVaultLocked) && memory.unlockAt && new Date(memory.unlockAt) > new Date();
+  
+  if (isLocked && !isOwner) {
+    let isReleased = false;
+    if (memory.ownerId) {
+      try {
+        const settings = await prisma.legacySettings.findUnique({
+          where: { userId: memory.ownerId }
+        });
+        isReleased = Boolean(settings?.isReleased);
+      } catch (_) {}
+    }
+
+    if (!isReleased) {
+      const error = new Error(`Access Denied: Memory is sealed in a Time Capsule until ${new Date(memory.unlockAt).toLocaleDateString()}.`);
+      error.statusCode = 403;
+      error.isLocked = true;
+      error.unlockAt = memory.unlockAt;
+      throw error;
+    }
+  }
 
   // Always allow owner
-  if (currentUserId && memory.ownerId === currentUserId) {
+  if (isOwner) {
     return serializeMemory(memory, currentUser);
   }
 
@@ -1313,7 +1450,16 @@ const getDiscoveryMemories = async ({ user, filter = "public", theme, q, page = 
     query = { ...publicPrivacyClause };
   }
 
-  const conditions = [];
+  const conditions = [
+    {
+      NOT: {
+        AND: [
+          { isVaultLocked: true },
+          { unlockAt: { gt: new Date() } }
+        ]
+      }
+    }
+  ];
 
   if (cleanTheme && cleanTheme !== "All" && cleanTheme !== "All Stories" && cleanTheme !== "Family") {
     let themeLower = cleanTheme.toLowerCase().replace(/stories|recordings/g, "").trim();
