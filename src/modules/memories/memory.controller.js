@@ -45,6 +45,8 @@ const createMemory = async (req, res) => {
       mediaOriginalName: req.body.mediaOriginalName,
       mediaList: req.body.mediaList,
       taggedUserIds: req.body.taggedUserIds,
+      isVaultLocked: req.body.isVaultLocked === "true" || req.body.isVaultLocked === true,
+      unlockAt: req.body.unlockAt,
     });
 
     console.log("[CREATE MEMORY DEBUG] ✅ Memory created successfully! ID:", memory.id, "Title:", memory.title);
@@ -143,6 +145,8 @@ const updateMemory = async (req, res) => {
       mediaOriginalName: req.body.mediaOriginalName,
       mediaList: req.body.mediaList,
       taggedUserIds: req.body.taggedUserIds,
+      isVaultLocked: req.body.isVaultLocked === "true" || req.body.isVaultLocked === true,
+      unlockAt: req.body.unlockAt,
     });
 
     res.status(200).json({

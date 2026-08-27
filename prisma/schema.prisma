@@ -91,6 +91,7 @@ model User {
 
   // Legacy Access Settings
   legacySettings        LegacySettings?
+  vaultReleaseRequests  VaultReleaseRequest[] @relation("VaultReleaseRequester")
 
   // MFA & Security Configuration
   mfaEnabled            Boolean           @default(false)
@@ -312,6 +313,10 @@ model Memory {
   backgroundId      String         @default("none")
   fontId            String         @default("default")
 
+  // Time-Capsule & Vault Locking
+  unlockAt          DateTime?
+  isVaultLocked     Boolean        @default(false)
+
   // Legacy single file keys (for backwards compatibility)
   mediaKey          String?
   thumbnailKey      String?
@@ -337,6 +342,7 @@ model Memory {
   familyLinks       FamilyMemoryLink[]
   mediaAssets       MediaAsset[]
   storyLayers       StoryLayer[]
+  embeddingDocs     EmbeddingDocument[]
 
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
@@ -352,16 +358,19 @@ model StoryLayer {
   id            String   @id @default(uuid())
   memoryId      String
   authorId      String
-  text          String   @default("")
-  audioKey      String?
-  audioDuration Float?
-  occurredAt    DateTime @default(now())
+  text               String   @default("")
+  audioKey           String?
+  audioDuration      Float?
+  transcriptText     String?
+  transcriptStatus   String   @default("NONE") // NONE, PENDING, PROCESSING, COMPLETED, FAILED
+  transcriptSegments Json?
+  occurredAt         DateTime @default(now())
 
-  memory        Memory   @relation(fields: [memoryId], references: [id], onDelete: Cascade)
-  author        User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  memory             Memory   @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  author             User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
 
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
   @@index([memoryId])
   @@index([authorId])
@@ -475,21 +484,24 @@ model FamilyMemoryLink {
 }
 
 model MediaAsset {
-  id           String   @id @default(uuid())
-  memoryId     String
-  ownerId      String
-  storageKey   String
-  thumbnailKey String?
-  originalName String   @default("")
-  mimeType     String   @default("")
-  fileSize     Int      @default(0)
-  durationSec  Float?
-  orderIndex   Int      @default(0)
+  id                 String   @id @default(uuid())
+  memoryId           String
+  ownerId            String
+  storageKey         String
+  thumbnailKey       String?
+  originalName       String   @default("")
+  mimeType           String   @default("")
+  fileSize           Int      @default(0)
+  durationSec        Float?
+  orderIndex         Int      @default(0)
+  transcriptText     String?
+  transcriptStatus   String   @default("NONE") // NONE, PENDING, PROCESSING, COMPLETED, FAILED
+  transcriptSegments Json?
 
-  memory       Memory   @relation(fields: [memoryId], references: [id], onDelete: Cascade)
-  owner        User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  memory             Memory   @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  owner              User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
 
-  createdAt    DateTime @default(now())
+  createdAt          DateTime @default(now())
 
   @@index([memoryId, orderIndex])
   @@index([ownerId])
@@ -601,10 +613,32 @@ model LegacySettings {
   releasedAt          DateTime?
   releasedBy          String?
 
+  releaseRequests     VaultReleaseRequest[]
+
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
   @@index([userId])
+}
+
+model VaultReleaseRequest {
+  id               String         @id @default(uuid())
+  legacySettingsId String
+  requesterId      String
+  status           String         @default("PENDING") // PENDING, APPROVED, REJECTED
+  reason           String         @default("")
+  verifiedBy       String?
+
+  legacySettings   LegacySettings @relation(fields: [legacySettingsId], references: [id], onDelete: Cascade)
+  requester        User           @relation("VaultReleaseRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([legacySettingsId])
+  @@index([requesterId])
+  @@index([status])
+  @@map("vault_release_requests")
 }
 
 model MfaTotpSecret {
@@ -1009,5 +1043,26 @@ model StoreReview {
   @@index([productId])
   @@index([userId])
   @@index([isApproved])
+}
+
+model EmbeddingDocument {
+  id             String   @id @default(uuid())
+  familyCircleId String?
+  memoryId       String
+  mediaAssetId   String?
+  storyLayerId   String?
+  contentType    String   @default("TEXT") // TEXT, VOICE_TRANSCRIPT, VIDEO_TRANSCRIPT, STORY_LAYER
+  content        String
+  vectorText     String?  // Plaintext text representation for hybrid ILIKE search
+  metadata       Json?
+
+  memory         Memory   @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([memoryId])
+  @@index([familyCircleId])
+  @@map("embedding_documents")
 }
 

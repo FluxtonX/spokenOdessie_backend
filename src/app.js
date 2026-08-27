@@ -72,6 +72,8 @@ app.use((req, res, next) => {
 });
 
 // Routes
+const aiHistorianRoutes = require("./modules/aiHistorian/aiHistorian.routes");
+
 app.use("/api/auth", authRoutes);
 app.use("/api/albums", albumRoutes);
 app.use("/api/memories", memoryRoutes);
@@ -82,6 +84,7 @@ app.use("/api/family-circle", familyCircleRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/legacy-access", legacyAccessRoutes);
 app.use("/api/insights", insightsRoutes);
+app.use("/api/ai/family-historian", aiHistorianRoutes);
 
 // Odyssey Store e-commerce module — isolated domain at /api/v1/store
 app.use("/api/v1/store", odysseyStoreRoutes);
