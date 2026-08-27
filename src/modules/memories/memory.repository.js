@@ -96,6 +96,8 @@ const create = (payload) =>
       mediaOriginalName: payload.mediaOriginalName || "",
       mediaMimeType: payload.mediaMimeType || "",
       mediaList: payload.mediaList || [],
+      isVaultLocked: Boolean(payload.isVaultLocked),
+      unlockAt: payload.unlockAt ? new Date(payload.unlockAt) : null,
     },
   });
 

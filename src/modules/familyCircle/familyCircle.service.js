@@ -3,7 +3,7 @@ const { resolvePerspectiveRelationship, getDisplayLabel, normalizeRelationshipCo
 const { createNotification } = require("../notifications/notification.service");
 const { serializeUser } = require("../../utils/serializer");
 const { serializeMemory } = require("../memories/memory.service");
-const { getSignedFileUrl } = require("../../services/s3.service");
+const { getSignedFileUrl, uploadFileToS3 } = require("../../services/s3.service");
 
 // Debug: Check if prisma is loaded
 console.log("Prisma client loaded in familyCircle.service:", !!prisma, typeof prisma);
@@ -421,6 +421,15 @@ const removeFamilyMember = async ({ currentUser, targetUserId }) => {
   // Remove member
   await prisma.familyMember.delete({
     where: { id: targetMember.id }
+  });
+
+  // Invalidate legacy administrator assignments where targetUserId was assigned (Phase 10)
+  await prisma.legacySettings.updateMany({
+    where: { administratorId: targetUserId },
+    data: {
+      administratorId: null,
+      administratorName: "Unassigned"
+    }
   });
 
   return { message: "Member removed successfully" };
@@ -946,18 +955,54 @@ const getStoryLayers = async ({ memoryId }) => {
   });
 
   return Promise.all(
-    layers.map(async (layer) => {
+  layers.map(async (layer) => {
       const author = await serializeUser(layer.author);
       return { ...layer, author };
     })
   );
 };
 
+async function processAudioUpload(audioKey, audioUrl, folder = "family-prompts") {
+  const raw = audioKey || audioUrl;
+  if (!raw) return null;
+
+  if (!raw.startsWith("data:")) {
+    return raw;
+  }
+
+  try {
+    const matches = raw.match(/^data:([^;]+);base64,(.+)$/);
+    if (matches && matches.length === 3) {
+      const mimeType = matches[1];
+      const base64Data = matches[2];
+      const buffer = Buffer.from(base64Data, "base64");
+      const ext = mimeType.includes("mp3") ? ".mp3" : mimeType.includes("wav") ? ".wav" : ".webm";
+      const fileName = `voice-${Date.now()}${ext}`;
+
+      const uploadResult = await uploadFileToS3({
+        file: {
+          buffer,
+          originalname: fileName,
+          mimetype: mimeType
+        },
+        folder
+      });
+      if (uploadResult?.key) {
+        return uploadResult.key;
+      }
+    }
+  } catch (err) {
+    console.warn("Base64 S3 audio upload warning, preserving raw string:", err.message);
+  }
+
+  return raw;
+}
+
 /**
  * Ask the Family Prompts Engine
  */
 const createFamilyPrompt = async ({ currentUser, familyCircleId, question, category, audioKey, audioUrl }) => {
-  const effectiveKey = audioKey || audioUrl || null;
+  const effectiveKey = await processAudioUpload(audioKey, audioUrl, "family-prompts");
 
   const prompt = await prisma.familyPrompt.create({
     data: {
@@ -974,9 +1019,9 @@ const createFamilyPrompt = async ({ currentUser, familyCircleId, question, categ
   });
 
   const createdBy = await serializeUser(prompt.createdBy);
-  let finalAudioUrl = prompt.audioKey ? await getSignedFileUrl(prompt.audioKey) : audioUrl;
+  let finalAudioUrl = prompt.audioKey ? await getSignedFileUrl(prompt.audioKey) : null;
 
-  return { ...prompt, createdBy, audioUrl: finalAudioUrl };
+  return { ...prompt, createdBy, audioUrl: finalAudioUrl, audioKey: prompt.audioKey };
 };
 
 const getFamilyPrompts = async ({ currentUser, familyCircleId }) => {
@@ -1001,10 +1046,10 @@ const getFamilyPrompts = async ({ currentUser, familyCircleId }) => {
         p.responses.map(async (r) => {
           const author = await serializeUser(r.author);
           let audioUrl = r.audioKey ? await getSignedFileUrl(r.audioKey) : null;
-          return { ...r, author, audioUrl };
+          return { ...r, author, audioUrl, audioKey: r.audioKey };
         })
       );
-      return { ...p, createdBy, audioUrl: promptAudioUrl, responses };
+      return { ...p, createdBy, audioUrl: promptAudioUrl, audioKey: p.audioKey, responses };
     })
   );
 };
@@ -1017,7 +1062,7 @@ const respondToFamilyPrompt = async ({ currentUser, promptId, text, audioKey, au
     throw error;
   }
 
-  const effectiveKey = audioKey || audioUrl || null;
+  const effectiveKey = await processAudioUpload(audioKey, audioUrl, "family-responses");
 
   const response = await prisma.familyResponse.create({
     data: {
@@ -1030,9 +1075,9 @@ const respondToFamilyPrompt = async ({ currentUser, promptId, text, audioKey, au
   });
 
   const author = await serializeUser(response.author);
-  let finalAudioUrl = response.audioKey ? await getSignedFileUrl(response.audioKey) : audioUrl;
+  let finalAudioUrl = response.audioKey ? await getSignedFileUrl(response.audioKey) : null;
 
-  return { ...response, author, audioUrl: finalAudioUrl };
+  return { ...response, author, audioUrl: finalAudioUrl, audioKey: response.audioKey };
 };
 
 /**
