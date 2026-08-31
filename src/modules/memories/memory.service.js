@@ -6,6 +6,7 @@ const memoryRepository = require("./memory.repository");
 const prisma = require("../../config/prisma");
 const { uploadFileToS3, getSignedFileUrl } = require("../../services/s3.service");
 const { serializeUser } = require("../../utils/serializer");
+const { indexMemoryForRag } = require("../aiHistorian/embedding.service");
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
@@ -692,6 +693,9 @@ const createMemory = async ({
     serializedMemory.mediaUploadWarning = mediaUploadWarning;
   }
 
+  // Non-blocking auto-index memory into RAG EmbeddingDocument table
+  indexMemoryForRag(memory.id).catch(err => console.warn("Failed to auto-index memory for RAG:", memory.id, err.message));
+
   return serializedMemory;
 };
 
@@ -892,6 +896,9 @@ const updateMemory = async ({
       console.warn("Failed to process newly tagged notifications on update:", tagErr.message);
     }
   }
+
+  // Non-blocking auto-index updated memory into RAG EmbeddingDocument table
+  indexMemoryForRag(updatedMemory.id).catch(err => console.warn("Failed to re-index memory for RAG:", updatedMemory.id, err.message));
 
   return serializeMemory(updatedMemory, user);
 };
