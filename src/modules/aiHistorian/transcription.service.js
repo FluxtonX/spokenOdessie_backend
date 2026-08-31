@@ -1,11 +1,30 @@
 const prisma = require("../../config/prisma");
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
+const ffmpeg = require("fluent-ffmpeg");
+const ffmpegPath = require("ffmpeg-static");
+const { indexMemoryForRag } = require("./embedding.service");
+
+ffmpeg.setFfmpegPath(ffmpegPath);
 
 /**
- * Asynchronous Speech-to-Text (STT) Pipeline
- * Transcribes audio/video assets into timestamped transcripts cleanly and idempotently.
+ * Extract Audio from Video using FFmpeg
  */
+const extractAudioFromVideo = (videoFilePath) => {
+  return new Promise((resolve, reject) => {
+    const tempAudioPath = path.join(os.tmpdir(), `audio-${Date.now()}-${Math.random().toString(36).substring(7)}.mp3`);
+    
+    ffmpeg(videoFilePath)
+      .noVideo()
+      .audioCodec("libmp3lame")
+      .audioBitrate(128)
+      .output(tempAudioPath)
+      .on("end", () => resolve(tempAudioPath))
+      .on("error", (err) => reject(err))
+      .run();
+  });
+};
 
 /**
  * Process Media Asset Transcription Asynchronously
@@ -26,24 +45,39 @@ const processMediaAssetTranscription = async (mediaAssetId) => {
     data: { transcriptStatus: "PROCESSING" }
   });
 
+  let tempExtractedAudioPath = null;
+
   try {
     let transcriptText = "";
     let transcriptSegments = [];
+    let fileToTranscribe = asset.storageKey;
 
-    // Check OpenAI API Key availability for Whisper transcription
+    // 1. If Video asset, extract audio track using FFmpeg
+    if (asset.mimeType && asset.mimeType.startsWith("video/") && asset.storageKey && fs.existsSync(asset.storageKey)) {
+      try {
+        tempExtractedAudioPath = await extractAudioFromVideo(asset.storageKey);
+        fileToTranscribe = tempExtractedAudioPath;
+        console.log(` 🎵 [AUDIO EXTRACTION SUCCESS] Extracted audio track from video: ${asset.originalName}`);
+      } catch (extractErr) {
+        console.warn("Failed to extract audio from video with FFmpeg:", extractErr.message);
+      }
+    }
+
+    // 2. Check OpenAI API Key for Whisper transcription
     if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY.startsWith("sk-")) {
       const { OpenAI } = require("openai");
       const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-      // If local file exists or via S3 stream
-      if (asset.storageKey) {
-        // Attempt Whisper API transcription if file is accessible
+      if (fileToTranscribe && fs.existsSync(fileToTranscribe)) {
         const response = await openai.audio.transcriptions.create({
-          file: fs.createReadStream(asset.storageKey),
+          file: fs.createReadStream(fileToTranscribe),
           model: "whisper-1",
           response_format: "verbose_json",
           timestamp_granularities: ["segment"]
-        }).catch(() => null);
+        }).catch((err) => {
+          console.warn("Whisper API transcription failed:", err.message);
+          return null;
+        });
 
         if (response) {
           transcriptText = response.text || "";
@@ -52,11 +86,15 @@ const processMediaAssetTranscription = async (mediaAssetId) => {
       }
     }
 
-    // Fallback: If Whisper API is pending or not configured, generate text metadata transcript
+    // 3. Fallback: If Whisper API is pending or key unconfigured, generate structured metadata transcript
     if (!transcriptText) {
-      transcriptText = asset.originalName ? `Audio/Video recording: ${asset.originalName}` : "Voice recording preserved in Odyssey memory archive.";
+      const isVideo = asset.mimeType?.startsWith("video/");
+      transcriptText = isVideo
+        ? `Video recording "${asset.originalName || 'Preserved Video'}" preserved in family memory.`
+        : `Voice recording "${asset.originalName || 'Voice Note'}" preserved in family memory.`;
+      
       transcriptSegments = [
-        { start: 0, end: asset.durationSec || 10, text: transcriptText }
+        { start: 0, end: asset.durationSec || 15, text: transcriptText }
       ];
     }
 
@@ -69,6 +107,11 @@ const processMediaAssetTranscription = async (mediaAssetId) => {
       }
     });
 
+    // 4. Auto-index memory into RAG EmbeddingDocument table
+    if (asset.memoryId) {
+      await indexMemoryForRag(asset.memoryId).catch(() => {});
+    }
+
     return updated;
   } catch (err) {
     console.error("Transcription failed for MediaAsset:", mediaAssetId, err);
@@ -77,6 +120,13 @@ const processMediaAssetTranscription = async (mediaAssetId) => {
       data: { transcriptStatus: "FAILED" }
     });
     return null;
+  } finally {
+    // 5. Cleanup temporary extracted audio file if created
+    if (tempExtractedAudioPath && fs.existsSync(tempExtractedAudioPath)) {
+      try {
+        fs.unlinkSync(tempExtractedAudioPath);
+      } catch (_) {}
+    }
   }
 };
 
@@ -119,6 +169,11 @@ const processStoryLayerTranscription = async (storyLayerId) => {
       }
     });
 
+    // Auto-index memory into RAG EmbeddingDocument table
+    if (layer.memoryId) {
+      await indexMemoryForRag(layer.memoryId).catch(() => {});
+    }
+
     return updated;
   } catch (err) {
     console.error("Transcription failed for StoryLayer:", storyLayerId, err);
@@ -134,3 +189,4 @@ module.exports = {
   processMediaAssetTranscription,
   processStoryLayerTranscription
 };
+

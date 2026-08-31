@@ -2,7 +2,15 @@ const prisma = require("../../config/prisma");
 const { getAuthorizedScopeForUser } = require("./permissionScope.service");
 const { indexMemoryForRag } = require("./embedding.service");
 
-const STOPWORDS = new Set(["who", "what", "where", "when", "why", "how", "is", "are", "was", "were", "the", "a", "an", "of", "in", "on", "at", "to", "for", "and", "or", "it", "this", "that", "tell", "me", "about", "he", "she", "they", "them"]);
+const STOPWORDS = new Set([
+  "who", "what", "where", "when", "why", "how", "is", "are", "was", "were", 
+  "the", "a", "an", "of", "in", "on", "at", "to", "for", "and", "or", "it", 
+  "this", "that", "tell", "me", "about", "he", "she", "they", "them", "my", 
+  "your", "our", "his", "her", "their", "family", "memory", "memories", 
+  "story", "stories", "preserved", "context", "show", "did", "say", "know", 
+  "anything", "have", "has", "had", "with", "from", "can", "you", "does", "which",
+  "ai", "user", "users", "app", "system", "platform", "bot", "assistant", "profile", "account", "login", "dashboard"
+]);
 
 /**
  * Contextualize Follow-up Queries based on Conversation History
@@ -30,10 +38,13 @@ function contextualizeQuery(query, history = []) {
 /**
  * Perform Permission-Scoped Hybrid RAG Retrieval (Entities + Memories)
  */
-const retrieveAuthorizedRagContext = async ({ currentUser, query, history = [], topK = 5 }) => {
+const retrieveAuthorizedRagContext = async ({ currentUser, query, history = [], intentObj = {}, topK = 3 }) => {
   if (!query || typeof query !== "string") {
     return { chunks: [], sources: [] };
   }
+
+  const intent = typeof intentObj === "object" ? intentObj.intent : intentObj;
+  const targetEntityName = typeof intentObj === "object" ? intentObj.entityName : null;
 
   const contextualizedQuery = contextualizeQuery(query, history);
   const currentUserId = currentUser?.id || currentUser?.uid || currentUser?.sub || "anonymous";
@@ -41,49 +52,38 @@ const retrieveAuthorizedRagContext = async ({ currentUser, query, history = [], 
 
   // 1. Resolve Authorized Permission Scope for logged-in user
   const { allowedMemoryIds, allowedUserIds, activeCircleIds } = await getAuthorizedScopeForUser(currentUser);
-  
+
   console.log("\n===================================================================");
-  console.log(" 🔍 [AI HISTORIAN FORENSIC AUDIT — STEP 1: PERMISSION SCOPE]");
+  console.log(" 🔍 [AI HISTORIAN RELEVANCE RETRIEVAL — STEP 1: PERMISSION SCOPE]");
   console.log(` • Authenticated User: ID=${currentUserId}, Email=${userEmail}`);
-  console.log(` • Active Family Circle Count: ${activeCircleIds.length}`);
-  console.log(` • Authorized Family User Count: ${allowedUserIds.length}`);
-  console.log(` • Authorized Memory Count: ${allowedMemoryIds.length}`);
+  console.log(` • Intent: ${intent} | Target Entity: ${targetEntityName || "N/A"}`);
+  console.log(` • Authorized Family Users: ${allowedUserIds.length} | Authorized Memories: ${allowedMemoryIds.length}`);
   console.log("===================================================================\n");
 
   if (allowedUserIds.length === 0 && allowedMemoryIds.length === 0) {
     return { chunks: [], sources: [] };
   }
 
-  // Extract clean search tokens (excluding stopwords)
-  const rawTerms = contextualizedQuery.toLowerCase().split(/\s+/).map(t => t.replace(/[^a-z0-9]/gi, "")).filter(Boolean);
-  const terms = rawTerms.filter(t => !STOPWORDS.has(t) && t.length >= 2);
+  const searchTarget = targetEntityName || contextualizedQuery;
+  const rawTerms = searchTarget.toLowerCase().split(/\s+/).map(t => t.replace(/[^a-z0-9]/gi, "")).filter(Boolean);
+  const terms = rawTerms.filter(t => !STOPWORDS.has(t) && t.length >= 3);
 
   const chunks = [];
   const sourcesMap = new Map();
 
   // -------------------------------------------------------------------
-  // 2. ENTITY SEARCH: Query User, FamilyMember & FamilyRelation DB records
+  // 2. ENTITY SEARCH: Direct Person / Entity Lookup
   // -------------------------------------------------------------------
+  let matchedUserIds = [];
+
   if (allowedUserIds.length > 0) {
-    const userSearchConditions = [
-      { displayName: { contains: query, mode: "insensitive" } },
-      { email: { contains: query, mode: "insensitive" } },
-      { bio: { contains: query, mode: "insensitive" } },
-      { profession: { contains: query, mode: "insensitive" } }
-    ];
+    const cleanSearchTarget = (targetEntityName || searchTarget).toLowerCase().replace(/^(give me data about|data about|info about|details of|search for)\s+/i, "").trim();
 
-    terms.forEach(t => {
-      userSearchConditions.push({ displayName: { contains: t, mode: "insensitive" } });
-      userSearchConditions.push({ email: { contains: t, mode: "insensitive" } });
-      userSearchConditions.push({ bio: { contains: t, mode: "insensitive" } });
-      userSearchConditions.push({ profession: { contains: t, mode: "insensitive" } });
-    });
-
-    // A. Search Users in authorized family scope
-    const matchedUsers = await prisma.user.findMany({
+    // 1. First try exact/closest displayName match
+    let matchedUsers = await prisma.user.findMany({
       where: {
         id: { in: allowedUserIds },
-        OR: userSearchConditions
+        displayName: { contains: cleanSearchTarget, mode: "insensitive" }
       },
       select: {
         id: true,
@@ -101,184 +101,177 @@ const retrieveAuthorizedRagContext = async ({ currentUser, query, history = [], 
           }
         }
       },
-      take: topK
+      take: 5
     });
 
-    // B. Search FamilyMembers in authorized family circles by relationship name
-    const memberSearchConditions = terms.map(t => ({ relationship: { contains: t, mode: "insensitive" } }));
-    memberSearchConditions.push({ relationship: { contains: query, mode: "insensitive" } });
-
-    const matchedMembers = await prisma.familyMember.findMany({
-      where: {
-        familyCircleId: { in: activeCircleIds },
-        status: "ACTIVE",
-        OR: memberSearchConditions
-      },
-      include: {
-        user: {
-          select: {
-            id: true,
-            displayName: true,
-            email: true,
-            profession: true,
-            bio: true
+    // 2. Fallback to term search only if no direct displayName match
+    if (matchedUsers.length === 0 && terms.length > 0) {
+      const userSearchConditions = terms.map(t => ({ displayName: { contains: t, mode: "insensitive" } }));
+      matchedUsers = await prisma.user.findMany({
+        where: {
+          id: { in: allowedUserIds },
+          OR: userSearchConditions
+        },
+        select: {
+          id: true,
+          displayName: true,
+          email: true,
+          profession: true,
+          bio: true,
+          location: true,
+          familyMemberships: {
+            where: { familyCircleId: { in: activeCircleIds } },
+            select: {
+              role: true,
+              relationship: true,
+              familyCircle: { select: { name: true } }
+            }
           }
         },
-        familyCircle: { select: { name: true } }
-      },
-      take: topK
-    });
+        take: 5
+      });
+    }
 
-    // C. Search FamilyRelationshipEdges in authorized family circles
-    const edgeSearchConditions = terms.map(t => ({ relationshipCode: { contains: t, mode: "insensitive" } }));
-    edgeSearchConditions.push({ relationshipCode: { contains: query, mode: "insensitive" } });
+    matchedUserIds = matchedUsers.map(u => u.id);
 
-    const matchedEdges = await prisma.familyRelationshipEdge.findMany({
-      where: {
-        familyCircleId: { in: activeCircleIds },
-        OR: edgeSearchConditions
-      },
-      include: {
-        fromUser: { select: { displayName: true } },
-        toUser: { select: { displayName: true } }
-      },
-      take: topK
-    });
-
-    console.log(" 🔍 [AI HISTORIAN FORENSIC AUDIT — STEP 2: ENTITY SEARCH RESULTS]");
-    console.log(` • Matched Authorized Users in DB: ${matchedUsers.length}`, matchedUsers.map(u => ({ id: u.id, name: u.displayName })));
-    console.log(` • Matched Family Member Records in DB: ${matchedMembers.length}`, matchedMembers.map(m => ({ id: m.id, rel: m.relationship, name: m.user?.displayName })));
-    console.log(` • Matched Family Relationship Edges in DB: ${matchedEdges.length}`, matchedEdges.map(e => ({ from: e.fromUser?.displayName, rel: e.relationshipCode, to: e.toUser?.displayName })));
+    console.log(" 🔍 [AI HISTORIAN RELEVANCE RETRIEVAL — STEP 2: ENTITY MATCHES]");
+    console.log(` • Matched Authorized Users: ${matchedUsers.length}`, matchedUsers.map(u => ({ id: u.id, name: u.displayName })));
     console.log("===================================================================\n");
 
-    // Format Matched Users into Grounded RAG Context Chunks
     for (const u of matchedUsers) {
       const circleNames = u.familyMemberships.map(m => m.familyCircle?.name).filter(Boolean).join(", ");
-      const roles = u.familyMemberships.map(m => `${m.relationship} (${m.role})`).join(", ");
+      const roles = u.familyMemberships.map(m => `${m.relationship || 'Family Member'} (${m.role || 'Member'})`).join(", ");
 
-      const entityChunk = `[Family Member User Profile: "${u.displayName}" | Email: "${u.email || ''}" | Circle: "${circleNames || 'Family Circle'}" | Role/Relation: "${roles || 'Family Member'}" | Profession: "${u.profession || 'N/A'}" | Bio: "${u.bio || 'N/A'}"]`;
+      const entityChunk = `[Family Member Profile: "${u.displayName}" | Circle: "${circleNames || 'Family Circle'}" | Role/Relation: "${roles || 'Family Member'}" | Profession: "${u.profession || 'N/A'}" | Bio: "${u.bio || 'N/A'}"]`;
       chunks.push(entityChunk);
 
       if (!sourcesMap.has(u.id)) {
         sourcesMap.set(u.id, {
           memoryId: u.id,
+          id: u.id,
           title: `Family Member: ${u.displayName}`,
-          description: u.bio || `${u.displayName} is a verified family member in ${circleNames || 'your family space'}.`,
+          description: u.bio || `${u.displayName} is a verified member in ${circleNames || 'your family circle'}.`,
           authorName: u.displayName,
           type: "family_entity"
         });
       }
     }
-
-    // Format Matched Members into Grounded RAG Context Chunks
-    for (const m of matchedMembers) {
-      if (m.user && !sourcesMap.has(m.user.id)) {
-        const entityChunk = `[Family Circle Relationship: "${m.user.displayName}" is a ${m.relationship} (${m.role}) in "${m.familyCircle?.name || 'Family Circle'}"]`;
-        chunks.push(entityChunk);
-
-        sourcesMap.set(m.user.id, {
-          memoryId: m.user.id,
-          title: `Family Relation: ${m.user.displayName}`,
-          description: `${m.user.displayName} is linked as ${m.relationship} in ${m.familyCircle?.name || 'your family circle'}.`,
-          authorName: m.user.displayName,
-          type: "family_entity"
-        });
-      }
-    }
-
-    // Format Matched Edges into Grounded RAG Context Chunks
-    for (const e of matchedEdges) {
-      const edgeChunk = `[Family Relationship Connection: "${e.fromUser?.displayName}" is ${e.relationshipType} "${e.toUser?.displayName}"]`;
-      chunks.push(edgeChunk);
-    }
   }
 
   // -------------------------------------------------------------------
-  // 3. MEMORY SEARCH: Query EmbeddingDocument & Memory DB records
+  // 3. MEMORY SEARCH: Relevant Memory Records & Transcripts
   // -------------------------------------------------------------------
   if (allowedMemoryIds.length > 0) {
-    // Ensure memories are indexed in EmbeddingDocument table
-    const unindexedMemories = await prisma.memory.findMany({
-      where: {
-        id: { in: allowedMemoryIds },
-        embeddingDocs: { none: {} }
-      },
-      select: { id: true }
-    });
+    const memoryWhere = {
+      id: { in: allowedMemoryIds }
+    };
 
-    if (unindexedMemories.length > 0) {
-      for (const mem of unindexedMemories.slice(0, 10)) {
-        await indexMemoryForRag(mem.id).catch(() => {});
-      }
-    }
-
-    const searchConditions = [
-      { content: { contains: query, mode: "insensitive" } },
-      { content: { contains: contextualizedQuery, mode: "insensitive" } }
-    ];
-    if (terms.length > 0) {
+    // If searching for a specific person, prioritize memories owned by or tagging them
+    if (intent === "PERSON_ENTITY_LOOKUP" && matchedUserIds.length > 0) {
+      memoryWhere.OR = [
+        { ownerId: { in: matchedUserIds } },
+        { taggedUserIds: { hasSome: matchedUserIds } }
+      ];
+    } else {
+      const searchConditions = [
+        { content: { contains: searchTarget, mode: "insensitive" } }
+      ];
       terms.forEach(term => {
         searchConditions.push({ content: { contains: term, mode: "insensitive" } });
       });
+
+      const embeddingDocs = await prisma.embeddingDocument.findMany({
+        where: {
+          memoryId: { in: allowedMemoryIds },
+          OR: searchConditions
+        },
+        select: { memoryId: true }
+      });
+
+      const matchedMemoryIds = Array.from(new Set(embeddingDocs.map(d => d.memoryId)));
+      memoryWhere.id = { in: matchedMemoryIds.length > 0 ? matchedMemoryIds : allowedMemoryIds };
     }
 
-    const matchedDocs = await prisma.embeddingDocument.findMany({
-      where: {
-        memoryId: { in: allowedMemoryIds },
-        OR: searchConditions
+    const candidateMemories = await prisma.memory.findMany({
+      where: memoryWhere,
+      select: {
+        id: true,
+        title: true,
+        description: true,
+        occurredAt: true,
+        type: true,
+        tags: true,
+        mood: true,
+        mediaKey: true,
+        owner: { select: { id: true, displayName: true } },
+        mediaAssets: { select: { id: true, transcriptText: true } },
+        storyLayers: { select: { id: true, text: true, transcriptText: true } }
       },
-      include: {
-        memory: {
-          select: {
-            id: true,
-            title: true,
-            description: true,
-            occurredAt: true,
-            type: true,
-            audioUrl: true,
-            voiceAssetUrl: true,
-            mediaFiles: true,
-            privacy: true,
-            location: true,
-            owner: { select: { id: true, displayName: true, avatarUrl: true } }
-          }
-        }
-      },
-      take: Math.min(topK * 2, 20)
+      take: 10
     });
 
-    console.log(" 🔍 [AI HISTORIAN FORENSIC AUDIT — STEP 3: MEMORY SEARCH RESULTS]");
-    console.log(` • Raw Query: "${query}"`);
-    console.log(` • Contextualized Query: "${contextualizedQuery}"`);
-    console.log(` • Matching Embedding Memory Chunks Found: ${matchedDocs.length}`);
-    if (matchedDocs.length > 0) {
-      console.log(` • Retrieved Memory Record IDs:`, matchedDocs.map(d => d.memoryId));
-      console.log(` • Retrieved Memory Titles:`, matchedDocs.map(d => d.memory?.title));
-    } else {
-      console.log(` • Retrieved Memory Record IDs: NONE (0 matching memory records in DB)`);
-    }
+    // Score & Rank Memories by Relevance
+    const scoredMemories = candidateMemories.map(mem => {
+      let score = 0;
+      const titleLower = (mem.title || "").toLowerCase();
+      const descLower = (mem.description || "").toLowerCase();
+      const authorLower = (mem.owner?.displayName || "").toLowerCase();
+
+      const transcripts = [
+        ...(mem.mediaAssets || []).map(a => a.transcriptText || ""),
+        ...(mem.storyLayers || []).map(l => (l.text || "") + " " + (l.transcriptText || ""))
+      ].join(" ").toLowerCase();
+
+      const hasTranscript = transcripts.trim().length > 10;
+
+      // Boost transcript-backed memories for RECORDING_QUESTION intent
+      if (intent === "RECORDING_QUESTION" && hasTranscript) {
+        score += 120;
+      }
+
+      // Entity / Owner Match
+      if (matchedUserIds.includes(mem.owner?.id)) score += 60;
+      if (terms.some(t => authorLower.includes(t))) score += 50;
+
+      // Title Match
+      if (terms.some(t => titleLower.includes(t))) score += 80;
+
+      // Description Match
+      if (terms.some(t => descLower.includes(t))) score += 40;
+
+      // Transcript / Story Layer Content Match
+      if (terms.some(t => transcripts.includes(t))) score += 35;
+
+      return { mem, score, transcripts };
+    }).sort((a, b) => b.score - a.score);
+
+    console.log(" 🔍 [AI HISTORIAN RELEVANCE RETRIEVAL — STEP 3: MEMORY RESULTS]");
+    console.log(` • Candidate Memories Scored: ${scoredMemories.length}`, scoredMemories.map(s => ({ title: s.mem.title, score: s.score })));
     console.log("===================================================================\n");
 
-    for (const doc of matchedDocs.slice(0, topK)) {
-      const mem = doc.memory;
+    const effectiveTopK = intent === "PERSON_ENTITY_LOOKUP" ? 2 : topK;
+
+    for (const { mem, transcripts } of scoredMemories.slice(0, effectiveTopK)) {
       const authorName = mem?.owner?.displayName || "Family Member";
       const dateStr = mem?.occurredAt ? new Date(mem.occurredAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "";
 
-      const chunkText = `[Preserved Memory ID: "${mem?.id}" | Title: "${mem?.title || 'Story'}" by ${authorName} on ${dateStr}]\n${doc.content || mem?.description || ""}`;
+      const bodyText = (transcripts && transcripts.length > 20) ? transcripts : (mem.description || mem.title);
+      const chunkText = `[Preserved Memory ID: "${mem.id}" | Title: "${mem.title}" | Author: "${authorName}" | Date: "${dateStr}"]\n${bodyText}`;
       chunks.push(chunkText);
 
-      if (mem && !sourcesMap.has(mem.id)) {
+      if (!sourcesMap.has(mem.id)) {
         sourcesMap.set(mem.id, {
-          ...mem,
           memoryId: mem.id,
           id: mem.id,
           title: mem.title,
-          description: mem.description,
+          description: mem.description || "",
           authorName,
           occurredAt: mem.occurredAt,
-          type: mem.type,
-          audioUrl: mem.audioUrl || mem.voiceAssetUrl,
-          mediaFiles: mem.mediaFiles || []
+          type: mem.type || "Text",
+          tags: mem.tags || [],
+          mood: mem.mood || "",
+          mediaKey: mem.mediaKey || null,
+          mediaAssetsCount: (mem.mediaAssets || []).length
         });
       }
     }
