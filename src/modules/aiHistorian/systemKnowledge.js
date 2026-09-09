@@ -26,6 +26,10 @@ const SPOKEN_ODYSSEY_KNOWLEDGE = {
     {
       name: "AI Family Historian",
       description: "An empathetic conversational AI assistant grounded strictly in your family's authorized memories and recordings. It helps you search, explore, and connect stories preserved in your family archive."
+    },
+    {
+      name: "Smart Glasses POV Capture",
+      description: "Sync hands-free point-of-view audio and video memories directly from paired AI smart glasses through our companion mobile apps."
     }
   ],
 
@@ -34,7 +38,9 @@ const SPOKEN_ODYSSEY_KNOWLEDGE = {
     "how does ai historian work": "In Spoken Odyssey, the AI Family Historian analyzes your authorized family memories, voice transcripts, and relationship connections using permission-scoped RAG (Retrieval-Augmented Generation). It answers questions warmly and accurately based strictly on what your family has recorded.",
     "how do i preserve a memory": "Click the '+ Add Memory' button in your dashboard. You can add a title, description, photos, videos, or record a voice story layer, then choose your privacy settings (Private, Family Circle, or Public).",
     "how does time capsule work": "When creating or editing a memory, enable 'Time Capsule Vault' and pick a future unlock date. The memory content and media will remain securely sealed until that date arrives.",
-    "how do i invite family members": "Go to the Family Circle page and click 'Invite Family Member'. You can send an invitation via email or SMS with an assigned family relationship role."
+    "how do i invite family members": "Go to the Family Circle page and click 'Invite Family Member'. You can send an invitation via email or SMS with an assigned family relationship role.",
+    "smart glasses": "Spoken Odyssey pairs seamlessly with AI recording smart glasses. Captured point-of-view videos and audio sync through the companion app and are preserved, transcribed, and indexed into your private family archive.",
+    "ai glasses": "Spoken Odyssey pairs seamlessly with AI recording smart glasses. Captured point-of-view videos and audio sync through the companion app and are preserved, transcribed, and indexed into your private family archive."
   }
 };
 
