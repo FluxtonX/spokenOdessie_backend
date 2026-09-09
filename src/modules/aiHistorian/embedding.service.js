@@ -65,7 +65,8 @@ const indexMemoryForRag = async (memoryId) => {
   const docsToCreate = [];
 
   // 1. Index Main Memory Title & Description
-  const mainText = `${memory.title}\n${memory.description || ""}\nTags: ${(memory.tags || []).join(", ")}`;
+  const deviceTag = memory.deviceSource === "AI_GLASSES" ? " [Smart Glasses POV Capture]" : "";
+  const mainText = `${memory.title}${deviceTag}\n${memory.description || ""}\nTags: ${(memory.tags || []).join(", ")}`;
   const mainChunks = chunkText(mainText);
 
   for (const chunk of mainChunks) {
@@ -80,7 +81,9 @@ const indexMemoryForRag = async (memoryId) => {
         occurredAt: memory.occurredAt,
         tags: memory.tags,
         privacy: memory.privacy,
-        type: memory.type
+        type: memory.type,
+        deviceSource: memory.deviceSource,
+        deviceIdentifier: memory.deviceIdentifier
       }
     });
   }
@@ -123,7 +126,8 @@ const indexMemoryForRag = async (memoryId) => {
           metadata: {
             title: `Media Transcript: ${media.originalName || memory.title}`,
             durationSec: media.durationSec,
-            mimeType: media.mimeType
+            mimeType: media.mimeType,
+            deviceSource: media.deviceSource || memory.deviceSource
           }
         });
       }

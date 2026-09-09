@@ -2,7 +2,7 @@ const { S3Client } = require("@aws-sdk/client-s3");
 const { SNSClient, PublishCommand } = require("@aws-sdk/client-sns");
 
 const region = (process.env.AWS_REGION || "ap-south-1").trim();
-const s3BucketName = (process.env.AWS_S3_BUCKET_NAME || "").trim();
+const s3BucketName = (process.env.AWS_S3_BUCKET_NAME || process.env.S3_BUCKET_NAME || "spoken-odyssey-media").trim();
 const snsTopicArn = (process.env.AWS_SNS_TOPIC_ARN || "").trim();
 
 const credentials =

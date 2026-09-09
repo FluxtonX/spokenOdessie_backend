@@ -151,6 +151,12 @@ enum MemberStatus {
   SUSPENDED
 }
 
+enum DeviceSourceType {
+  WEB_UPLOAD
+  MOBILE_CAMERA
+  AI_GLASSES
+}
+
 model Follow {
   id          String   @id @default(uuid())
   followerId  String
@@ -344,6 +350,10 @@ model Memory {
   storyLayers       StoryLayer[]
   embeddingDocs     EmbeddingDocument[]
 
+  // Hardware Provenance (AI Glasses / Mobile / Web)
+  deviceSource      DeviceSourceType @default(WEB_UPLOAD)
+  deviceIdentifier  String?          // e.g. Glasses MAC address
+
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
 
@@ -351,6 +361,7 @@ model Memory {
   @@index([albumId])
   @@index([status])
   @@index([privacy])
+  @@index([deviceSource])
   @@index([ownerId, status, occurredAt(sort: Desc)])
 }
 
@@ -501,10 +512,19 @@ model MediaAsset {
   memory             Memory   @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   owner              User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
 
+  // Hardware Provenance & Deduplication
+  deviceSource      DeviceSourceType @default(WEB_UPLOAD)
+  deviceIdentifier  String?          // Glasses MAC or Serial
+  deviceMediaId     String?          // Internal file name on glasses (e.g. IMG_001.JPG)
+  captureChecksum   String?          // SHA-256 content hash
+
   createdAt          DateTime @default(now())
 
+  @@unique([ownerId, deviceIdentifier, deviceMediaId])
   @@index([memoryId, orderIndex])
   @@index([ownerId])
+  @@index([captureChecksum])
+  @@index([deviceSource])
   @@map("media_assets")
 }
 

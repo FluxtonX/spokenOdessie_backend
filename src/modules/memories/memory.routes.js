@@ -40,6 +40,7 @@ router.get("/discovery", optionalProtect, controller.getDiscoveryMemories);
 router.get("/family-shared", protect, controller.getFamilySharedMemories);
 router.get("/", optionalProtect, controller.getMemories);
 router.get("/:id", optionalProtect, controller.getMemoryDetails);
+router.post("/glasses-ingest", protect, controller.ingestGlassesMedia);
 router.post("/", protect, upload.array("media", 10), controller.createMemory);
 router.post("/:id/interact", protect, controller.interactWithMemory);
 router.post("/:id/react", protect, controller.reactToMemory);

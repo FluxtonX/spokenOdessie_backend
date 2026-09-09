@@ -305,6 +305,8 @@ const serializeMemory = async (memoryDoc, currentUser = null) => {
     isVaultLocked: Boolean(memory.isVaultLocked),
     isLocked: isSealed,
     unlockAt: memory.unlockAt || null,
+    deviceSource: memory.deviceSource || "WEB_UPLOAD",
+    deviceIdentifier: memory.deviceIdentifier || null,
     ownerDisplayName,
     ownerEmail,
     ownerProfession,
@@ -1644,10 +1646,248 @@ const getMemoryStoryLayers = async ({ memoryId }) => {
   );
 };
 
+const ingestGlassesMedia = async (user, payload = {}) => {
+  if (!user || !user.id) {
+    const err = new Error("Authentication required to ingest glasses media.");
+    err.statusCode = 401;
+    throw err;
+  }
+
+  const {
+    title,
+    description,
+    privacy = "Private",
+    albumId,
+    familyCircleId,
+    occurredAt,
+    deviceIdentifier,
+    assets: explicitAssets,
+    mediaAssets,
+    media,
+    tags = [],
+    mood = "",
+  } = payload;
+
+  const assets = Array.isArray(explicitAssets) ? explicitAssets : (Array.isArray(mediaAssets) ? mediaAssets : (Array.isArray(media) ? media : []));
+
+  if (assets.length === 0) {
+    const err = new Error("No media assets provided in glasses ingest payload.");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const userId = user.id;
+
+  // 1. Check for duplicate ingestion
+  const existingAssets = [];
+  const newAssetsToIngest = [];
+
+  for (const asset of assets) {
+    let match = null;
+    if (deviceIdentifier && asset.deviceMediaId) {
+      match = await prisma.mediaAsset.findUnique({
+        where: {
+          ownerId_deviceIdentifier_deviceMediaId: {
+            ownerId: userId,
+            deviceIdentifier: String(deviceIdentifier),
+            deviceMediaId: String(asset.deviceMediaId),
+          },
+        },
+      });
+    }
+
+    if (!match && asset.captureChecksum) {
+      match = await prisma.mediaAsset.findFirst({
+        where: {
+          ownerId: userId,
+          captureChecksum: String(asset.captureChecksum),
+        },
+      });
+    }
+
+    if (match) {
+      existingAssets.push(match);
+    } else {
+      newAssetsToIngest.push(asset);
+    }
+  }
+
+  // If ALL assets were already ingested, return existing memory idempotently
+  if (newAssetsToIngest.length === 0 && existingAssets.length > 0) {
+    const firstMatch = existingAssets[0];
+    const existingMem = await prisma.memory.findUnique({
+      where: { id: firstMatch.memoryId },
+      include: { mediaAssets: true },
+    });
+    return {
+      isDuplicate: true,
+      message: "All media assets have already been ingested (idempotent retry).",
+      data: {
+        memoryId: firstMatch.memoryId,
+        memory: existingMem ? await serializeMemory(existingMem, user) : null,
+        skippedDuplicatesCount: existingAssets.length,
+        ingestedAssetsCount: 0,
+      },
+    };
+  }
+
+  // Determine primary media type
+  let primaryType = "Photo";
+  if (newAssetsToIngest.some((a) => a.mimeType?.startsWith("video/"))) {
+    primaryType = "Video";
+  } else if (newAssetsToIngest.some((a) => a.mimeType?.startsWith("audio/"))) {
+    primaryType = "Voice";
+  }
+
+  const primaryAsset = newAssetsToIngest[0];
+
+  // Build mediaList structured JSON
+  const mediaListJson = newAssetsToIngest.map((a, idx) => ({
+    mediaKey: a.storageKey,
+    thumbnailKey: a.thumbnailKey || null,
+    mediaOriginalName: a.originalName || `POV_Capture_${idx + 1}`,
+    mediaMimeType: a.mimeType || "image/jpeg",
+    deviceSource: "AI_GLASSES",
+    deviceIdentifier: deviceIdentifier || null,
+    deviceMediaId: a.deviceMediaId || null,
+  }));
+
+  const userDoc = await prisma.user.findUnique({ where: { id: userId } });
+  const finalTitle =
+    title?.trim() ||
+    `POV Memory — ${new Date(occurredAt || Date.now()).toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    })}`;
+
+  // Create Memory record
+  const memory = await memoryRepository.create({
+    ownerFirebaseUid: userId,
+    ownerDisplayName: getOwnerDisplayName(userDoc || user),
+    ownerEmail: user.email || userDoc?.email || "",
+    title: finalTitle,
+    description: description?.trim() || "Captured with Spoken Odyssey AI Glasses",
+    tags: Array.isArray(tags) ? Array.from(new Set(["AI Glasses", "POV", ...tags])) : ["AI Glasses", "POV"],
+    taggedUserIds: [],
+    mood: mood || "Reflective",
+    privacy: privacy || "Private",
+    type: primaryType,
+    status: "published",
+    albumId: albumId || null,
+    occurredAt: normalizeOccurredAt(occurredAt),
+    mediaKey: primaryAsset.storageKey,
+    thumbnailKey: primaryAsset.thumbnailKey || null,
+    mediaOriginalName: primaryAsset.originalName || "",
+    mediaMimeType: primaryAsset.mimeType || "",
+    mediaList: mediaListJson,
+    deviceSource: "AI_GLASSES",
+    deviceIdentifier: deviceIdentifier || null,
+  });
+
+  // Create MediaAsset records
+  const createdMediaAssets = [];
+  for (let i = 0; i < newAssetsToIngest.length; i++) {
+    const a = newAssetsToIngest[i];
+    const isAudioOrVideo = a.mimeType?.startsWith("audio/") || a.mimeType?.startsWith("video/");
+    const createdAsset = await prisma.mediaAsset.create({
+      data: {
+        memoryId: memory.id,
+        ownerId: userId,
+        storageKey: a.storageKey,
+        thumbnailKey: a.thumbnailKey || null,
+        originalName: a.originalName || "",
+        mimeType: a.mimeType || "image/jpeg",
+        fileSize: typeof a.fileSize === "number" ? a.fileSize : 0,
+        durationSec: typeof a.durationSec === "number" ? a.durationSec : null,
+        orderIndex: i,
+        deviceSource: "AI_GLASSES",
+        deviceIdentifier: deviceIdentifier || null,
+        deviceMediaId: a.deviceMediaId ? String(a.deviceMediaId) : null,
+        captureChecksum: a.captureChecksum ? String(a.captureChecksum) : null,
+        transcriptStatus: isAudioOrVideo ? "PENDING" : "NONE",
+      },
+    });
+    createdMediaAssets.push(createdAsset);
+  }
+
+  // Link to Family Circle if provided
+  if (familyCircleId) {
+    try {
+      const circle = await prisma.familyCircle.findFirst({
+        where: {
+          id: familyCircleId,
+          members: { some: { userId } },
+        },
+      });
+      if (circle) {
+        await prisma.familyMemoryLink.create({
+          data: {
+            familyCircleId: circle.id,
+            memoryId: memory.id,
+            linkedById: userId,
+            occurredAt: memory.occurredAt,
+          },
+        });
+      }
+    } catch (circleErr) {
+      console.warn("Could not link glasses memory to family circle:", circleErr.message);
+    }
+  }
+
+  // Trigger Asynchronous Audio Extraction / Transcription / RAG Indexing
+  try {
+    const { processMediaAssetTranscription } = require("../aiHistorian/transcription.service");
+    const { indexMemoryForRag } = require("../aiHistorian/embedding.service");
+
+    for (const ma of createdMediaAssets) {
+      if (ma.mimeType?.startsWith("audio/") || ma.mimeType?.startsWith("video/")) {
+        processMediaAssetTranscription(ma.id).catch((transcribeErr) => {
+          console.warn(`[AI GLASSES ASYNC ERROR] Failed transcription for asset ${ma.id}:`, transcribeErr.message);
+        });
+      }
+    }
+
+    indexMemoryForRag(memory.id).catch((ragErr) => {
+      console.warn(`[AI GLASSES ASYNC ERROR] Failed RAG indexing for memory ${memory.id}:`, ragErr.message);
+    });
+  } catch (aiModErr) {
+    console.warn("[AI GLASSES PIPELINE] AI Historian hooks not available:", aiModErr.message);
+  }
+
+  // Realtime notification via Socket.IO
+  try {
+    const { getIO } = require("../../socket");
+    const io = getIO();
+    if (io) {
+      io.to(`user:${userId}`).emit("memory:glasses_ingested", {
+        memoryId: memory.id,
+        title: memory.title,
+        deviceSource: "AI_GLASSES",
+      });
+    }
+  } catch (_) {}
+
+  const serialized = await serializeMemory(memory, user);
+
+  return {
+    isDuplicate: false,
+    message: "Glasses media ingested successfully into Memory.",
+    data: {
+      memoryId: memory.id,
+      memory: serialized,
+      ingestedAssetsCount: createdMediaAssets.length,
+      skippedDuplicatesCount: existingAssets.length,
+      deviceSource: "AI_GLASSES",
+    },
+  };
+};
+
 module.exports = {
   serializeMemory,
   getMemoriesByUser,
   createMemory,
+  ingestGlassesMedia,
   updateMemory,
   deleteMemory,
   getFeedMemories,
