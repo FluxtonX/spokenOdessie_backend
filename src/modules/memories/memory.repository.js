@@ -98,6 +98,8 @@ const create = (payload) =>
       mediaList: payload.mediaList || [],
       isVaultLocked: Boolean(payload.isVaultLocked),
       unlockAt: payload.unlockAt ? new Date(payload.unlockAt) : null,
+      deviceSource: payload.deviceSource || "WEB_UPLOAD",
+      deviceIdentifier: payload.deviceIdentifier || null,
     },
   });
 

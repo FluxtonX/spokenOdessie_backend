@@ -309,9 +309,27 @@ const getStoryLayers = async (req, res) => {
   }
 };
 
+const ingestGlassesMedia = async (req, res) => {
+  try {
+    const result = await memoryService.ingestGlassesMedia(req.user, req.body);
+    res.status(result.isDuplicate ? 200 : 201).json({
+      success: true,
+      message: result.message,
+      data: result.data,
+    });
+  } catch (error) {
+    console.error("Glasses Ingest Controller Error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Failed to ingest glasses media",
+    });
+  }
+};
+
 module.exports = {
   getMemories,
   createMemory,
+  ingestGlassesMedia,
   updateMemory,
   deleteMemory,
   getFeed,
