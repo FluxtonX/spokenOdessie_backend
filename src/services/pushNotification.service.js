@@ -74,8 +74,8 @@ async function sendWebPushNotification({ userId, title, body, actionUrl, metadat
     const brandTitle = title.startsWith("Spoken Odyssey") ? title : `Spoken Odyssey • ${title}`;
     const brandBody = String(body || "");
     const url = actionUrl || "/memories";
-    const brandIcon = "/odyssey.png";
-    const brandBadge = "/odyssey.png";
+    const brandIcon = "/odysseyIcon.png";
+    const brandBadge = "/odysseyIcon.png";
 
     // 2. Multicast batch send (up to 500 per batch)
     const chunkSize = 500;
