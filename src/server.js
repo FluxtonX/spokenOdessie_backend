@@ -27,4 +27,6 @@ const startServer = async () => {
   }
 };
 
+// GitHub Actions redeploys this backend when changes are pushed to main.
+// This comment is a harmless redeploy trigger; it does not change server behavior.
 startServer();
