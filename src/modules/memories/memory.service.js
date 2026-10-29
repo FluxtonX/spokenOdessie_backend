@@ -48,6 +48,21 @@ const normalizeTags = (rawTags) => {
   return [];
 };
 
+const normalizePlaces = (rawPlaces) => {
+  let values = rawPlaces;
+  if (typeof values === "string") {
+    try { values = JSON.parse(values); } catch (_) { values = values.split(","); }
+  }
+  if (!Array.isArray(values)) return [];
+  const unique = new Map();
+  values.forEach((place) => {
+    if (typeof place !== "string") return;
+    const clean = place.trim().replace(/\s+/g, " ").slice(0, 120);
+    if (clean) unique.set(clean.toLocaleLowerCase(), clean);
+  });
+  return Array.from(unique.values()).slice(0, 20);
+};
+
 const normalizeStatus = (status) =>
   typeof status === "string" && status.toLowerCase() === "draft"
     ? "draft"
@@ -277,6 +292,7 @@ const serializeMemory = async (memoryDoc, currentUser = null) => {
       : (memory.description || ""),
     tags: Array.isArray(memory.tags) ? memory.tags : [],
     taggedUserIds: taggedIds,
+    places: Array.isArray(memory.places) ? memory.places : [],
     taggedUsers,
     mood: memory.mood || "",
     category: memory.privacy || "Private",
@@ -467,6 +483,7 @@ const createMemory = async ({
   mediaOriginalName,
   mediaList,
   taggedUserIds,
+  places,
   isVaultLocked,
   unlockAt,
 }) => {
@@ -581,6 +598,7 @@ const createMemory = async ({
     description: normalizedDescription,
     tags: finalTags,
     taggedUserIds: normalizedTaggedUserIds,
+    places: normalizePlaces(places),
     mood: typeof mood === "string" ? mood.trim() : "",
     privacy: typeof privacy === "string" ? privacy.trim() || "Private" : "Private",
     type: typeof type === "string" ? type.trim() || "Text" : "Text",
@@ -721,6 +739,7 @@ const updateMemory = async ({
   mediaOriginalName,
   mediaList,
   taggedUserIds,
+  places,
 }) => {
   let memory = await memoryRepository.findByIdAndOwnerFirebaseUid(
     memoryId,
@@ -802,6 +821,10 @@ const updateMemory = async ({
 
   if (normalizedTaggedUserIds !== undefined) {
     payload.taggedUserIds = normalizedTaggedUserIds;
+  }
+
+  if (places !== undefined) {
+    payload.places = normalizePlaces(places);
   }
 
   if (album) {
