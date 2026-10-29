@@ -45,6 +45,7 @@ const createMemory = async (req, res) => {
       mediaOriginalName: req.body.mediaOriginalName,
       mediaList: req.body.mediaList,
       taggedUserIds: req.body.taggedUserIds,
+      places: req.body.places,
       isVaultLocked: req.body.isVaultLocked === "true" || req.body.isVaultLocked === true,
       unlockAt: req.body.unlockAt,
     });
@@ -145,6 +146,7 @@ const updateMemory = async (req, res) => {
       mediaOriginalName: req.body.mediaOriginalName,
       mediaList: req.body.mediaList,
       taggedUserIds: req.body.taggedUserIds,
+      places: req.body.places,
       isVaultLocked: req.body.isVaultLocked === "true" || req.body.isVaultLocked === true,
       unlockAt: req.body.unlockAt,
     });

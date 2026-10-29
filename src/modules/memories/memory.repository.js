@@ -82,6 +82,7 @@ const create = (payload) =>
       description: payload.description || "",
       tags: payload.tags || [],
       taggedUserIds: payload.taggedUserIds || [],
+      places: payload.places || [],
       mood: payload.mood || "",
       privacy: payload.privacy || "Private",
       type: payload.type || "Text",
