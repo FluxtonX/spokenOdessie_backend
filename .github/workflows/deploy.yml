@@ -8,7 +8,7 @@ on:
 jobs:
   deploy:
     name: SSH into EC2 and deploy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Deploy via SSH
