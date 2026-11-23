@@ -116,6 +116,16 @@ model User {
   @@index([phoneNumber])
 }
 
+model NewsletterSubscriber {
+  id        String   @id @default(uuid())
+  fullName  String
+  email     String   @unique
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("newsletter_subscribers")
+}
+
 model UserSession {
   id           String   @id @default(uuid())
   userId       String
