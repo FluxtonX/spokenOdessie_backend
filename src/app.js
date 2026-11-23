@@ -19,6 +19,7 @@ const legacyAccessRoutes = require("./modules/legacyAccess/legacyAccess.routes")
 const insightsRoutes = require("./modules/insights/insights.routes");
 const thenNowRoutes = require("./modules/thenNow/thenNow.routes");
 const dashboardRoutes = require("./modules/dashboard/dashboard.routes");
+const newsletterRoutes = require("./modules/newsletter/newsletter.routes");
 const odysseyStoreRoutes = require("./modules/odysseyStore/index");
 
 const app = express();
@@ -89,6 +90,7 @@ app.use("/api/insights", insightsRoutes);
 app.use("/api/then-now", thenNowRoutes);
 app.use("/api/ai/family-historian", aiHistorianRoutes);
 app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/newsletter", newsletterRoutes);
 
 // Odyssey Store e-commerce module — isolated domain at /api/v1/store
 app.use("/api/v1/store", odysseyStoreRoutes);
