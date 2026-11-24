@@ -21,6 +21,7 @@ const thenNowRoutes = require("./modules/thenNow/thenNow.routes");
 const dashboardRoutes = require("./modules/dashboard/dashboard.routes");
 const newsletterRoutes = require("./modules/newsletter/newsletter.routes");
 const odysseyStoreRoutes = require("./modules/odysseyStore/index");
+const adminRoutes = require("./modules/admin/admin.routes");
 
 const app = express();
 
@@ -94,6 +95,7 @@ app.use("/api/newsletter", newsletterRoutes);
 
 // Odyssey Store e-commerce module — isolated domain at /api/v1/store
 app.use("/api/v1/store", odysseyStoreRoutes);
+app.use("/api/admin", adminRoutes);
 
 app.get("/health", (req, res) => {
   res.status(200).json({

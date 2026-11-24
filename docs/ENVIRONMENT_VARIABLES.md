@@ -33,7 +33,12 @@ AWS_REGION="us-east-1"
 ```
 PORT=5001
 NODE_ENV="production"
+ADMIN_EMAIL="designated-admin@example.com"
+ADMIN_PASSWORD="a-long-unique-admin-password"
+JWT_SECRET="a-long-random-secret-value"
 ```
+
+`ADMIN_EMAIL` and `ADMIN_PASSWORD` are the credentials for the separate admin dashboard. They do not require a user account in the app database. Keep both values only in the backend runtime environment; never expose them as `NEXT_PUBLIC_*` variables.
 
 ## Local Development Example
 
