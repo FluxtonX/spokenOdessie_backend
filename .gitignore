@@ -6,3 +6,6 @@ node_modules/
 *.log
 
 /src/generated/prisma
+
+database-backup/
+*.dump
