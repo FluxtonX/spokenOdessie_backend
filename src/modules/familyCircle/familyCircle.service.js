@@ -217,6 +217,7 @@ const getFamilySharedMemories = async ({ currentUser, targetUserId, type, search
 
   // Construct search AND conditions
   const andConditions = [
+    { status: { notIn: ["archived", "removed"] } },
     {
       OR: [
         { privacy: { mode: "insensitive", contains: "family" } },
@@ -878,7 +879,7 @@ const getFamilyCircleTimeline = async ({ currentUser, familyCircleId, limit = 20
   const queryLimit = Math.min(Number(limit) || 20, 50);
 
   const links = await prisma.familyMemoryLink.findMany({
-    where: { familyCircleId },
+    where: { familyCircleId, memory: { status: { notIn: ["archived", "removed"] } } },
     take: queryLimit + 1,
     cursor: cursor ? { id: cursor } : undefined,
     skip: cursor ? 1 : 0,

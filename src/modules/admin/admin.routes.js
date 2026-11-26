@@ -14,5 +14,11 @@ router.get("/users", controller.getUsers);
 router.get("/users/:id", controller.getUserDetails);
 router.get("/families", controller.getFamilies);
 router.get("/families/:id", controller.getFamilyDetails);
+router.get("/content", controller.getContent);
+router.get("/content/:id", controller.getContentDetails);
+router.patch("/content/:id/status", controller.updateContentStatus);
+router.patch("/users/:id/status", controller.updateUserStatus);
+router.patch("/families/:familyId/invitations/:invitationId", controller.updateFamilyInvitation);
+router.get("/activity", controller.getAdminActivity);
 
 module.exports = router;

@@ -106,8 +106,9 @@ jobs:
             git fetch origin
             git checkout main
             git pull origin main
-            npm install --production
+            npm install --include=dev
             npx prisma generate
+            npm prune --omit=dev
             pm2 restart all || pm2 start src/server.js --name spoken-odyssey
             pm2 status
             echo "🚀 Deployment complete!"

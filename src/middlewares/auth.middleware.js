@@ -56,11 +56,17 @@ const protect = async (req, res, next) => {
       }
 
       if (decodedPayload.iss && decodedPayload.iss.includes("securetoken.google.com")) {
-        const decodedFirebase = await admin.auth().verifyIdToken(token);
-        const dbUser = await resolveFirebaseUser(decodedFirebase);
+        const decodedFirebase = await admin.auth().verifyIdToken(token, true);
+        let dbUser = await resolveFirebaseUser(decodedFirebase);
 
         if (!dbUser || !dbUser.id) {
           throw new Error("Could not map Firebase user to PostgreSQL user");
+        }
+        const restrictionService = require("../services/adminAccountRestrictions.service");
+        dbUser = await restrictionService.refreshExpiredRestriction(dbUser);
+        const accountRestriction = restrictionService.getEffectiveRestriction(dbUser);
+        if (["TEMPORARY_SUSPENDED", "PERMANENTLY_SUSPENDED"].includes(accountRestriction)) {
+          return res.status(403).json({ success: false, code: "ACCOUNT_DISABLED", message: "This account is currently disabled." });
         }
 
         const sessionJti = decodedFirebase.jti || decodedFirebase.sub || `fb-${dbUser.id}`;
@@ -73,6 +79,8 @@ const protect = async (req, res, next) => {
           email: dbUser.email,
           role: dbUser.role || "USER",
           sessionJti: sessionJti,
+          accountRestriction,
+          restrictionReason: dbUser.adminRestrictionReason || null,
         };
       } else {
         const JWT_SECRET = process.env.JWT_SECRET || "spoken_odyssey_super_secret_key_12345";
@@ -98,7 +106,32 @@ const protect = async (req, res, next) => {
           }
         }
 
-        req.user = {
+        if (decodedCustom.id) {
+          const prisma = require("../config/prisma");
+          let account = await prisma.user.findUnique({ where: { id: decodedCustom.id } });
+          if (account) {
+            const restrictionService = require("../services/adminAccountRestrictions.service");
+            account = await restrictionService.refreshExpiredRestriction(account);
+            const accountRestriction = restrictionService.getEffectiveRestriction(account);
+            if (["TEMPORARY_SUSPENDED", "PERMANENTLY_SUSPENDED"].includes(accountRestriction)) {
+              return res.status(403).json({ success: false, code: "ACCOUNT_DISABLED", message: "This account is currently disabled." });
+            }
+            req.user = {
+              id: decodedCustom.id,
+              uid: decodedCustom.id,
+              email: decodedCustom.email,
+              role: decodedCustom.role || "USER",
+              sessionJti: decodedCustom.jti,
+              accountRestriction,
+              restrictionReason: account.adminRestrictionReason || null,
+            };
+          }
+          if (account && account.adminRestriction === "NONE" && account.adminRestrictionUpdatedAt && decodedCustom.iat && decodedCustom.iat * 1000 < new Date(account.adminRestrictionUpdatedAt).getTime() - 1000) {
+            return res.status(401).json({ success: false, code: "SESSION_REVOKED", message: "Your account access has changed. Please sign in again." });
+          }
+        }
+
+        if (!decodedCustom.id) req.user = {
           id: decodedCustom.id,
           uid: decodedCustom.id,
           email: decodedCustom.email,
@@ -136,27 +169,43 @@ const optionalProtect = async (req, res, next) => {
 
       if (decodedPayload) {
         if (decodedPayload.iss && decodedPayload.iss.includes("securetoken.google.com")) {
-          const decodedFirebase = await admin.auth().verifyIdToken(token);
-          const dbUser = await resolveFirebaseUser(decodedFirebase);
+          const decodedFirebase = await admin.auth().verifyIdToken(token, true);
+          let dbUser = await resolveFirebaseUser(decodedFirebase);
 
           if (dbUser && dbUser.id) {
+            const restrictionService = require("../services/adminAccountRestrictions.service");
+            dbUser = await restrictionService.refreshExpiredRestriction(dbUser);
+            const accountRestriction = restrictionService.getEffectiveRestriction(dbUser);
+            if (["TEMPORARY_SUSPENDED", "PERMANENTLY_SUSPENDED"].includes(accountRestriction)) {
+              return res.status(403).json({ success: false, code: "ACCOUNT_DISABLED", message: "This account is currently disabled." });
+            }
             req.user = {
               id: dbUser.id,
               uid: dbUser.id,
               email: dbUser.email,
-              role: dbUser.role || "USER"
+              role: dbUser.role || "USER",
+              accountRestriction,
             };
           }
         } else {
           const JWT_SECRET = process.env.JWT_SECRET || "spoken_odyssey_super_secret_key_12345";
           const decodedCustom = jwt.verify(token, JWT_SECRET);
-
-          req.user = {
-            id: decodedCustom.id,
-            uid: decodedCustom.id,
-            email: decodedCustom.email,
-            role: decodedCustom.role || "USER",
-          };
+          if (decodedCustom.id) {
+            const prisma = require("../config/prisma");
+            let dbUser = await prisma.user.findUnique({ where: { id: decodedCustom.id } });
+            if (dbUser) {
+              const restrictionService = require("../services/adminAccountRestrictions.service");
+              dbUser = await restrictionService.refreshExpiredRestriction(dbUser);
+              const accountRestriction = restrictionService.getEffectiveRestriction(dbUser);
+              if (["TEMPORARY_SUSPENDED", "PERMANENTLY_SUSPENDED"].includes(accountRestriction)) {
+                return res.status(403).json({ success: false, code: "ACCOUNT_DISABLED", message: "This account is currently disabled." });
+              }
+              if (accountRestriction === "NONE" && dbUser.adminRestrictionUpdatedAt && decodedCustom.iat && decodedCustom.iat * 1000 < new Date(dbUser.adminRestrictionUpdatedAt).getTime() - 1000) {
+                return res.status(401).json({ success: false, code: "SESSION_REVOKED", message: "Your account access has changed. Please sign in again." });
+              }
+              req.user = { id: dbUser.id, uid: dbUser.id, email: decodedCustom.email, role: dbUser.role || "USER", accountRestriction, restrictionReason: dbUser.adminRestrictionReason || null };
+            }
+          }
         }
       }
     } catch (err) {
@@ -166,4 +215,12 @@ const optionalProtect = async (req, res, next) => {
   return next();
 };
 
-module.exports = { protect, optionalProtect };
+const requirePostingAccess = (req, res, next) => {
+  if (req.user?.accountRestriction === "POSTING_RESTRICTED") {
+    const reason = req.user.restrictionReason ? ` Reason: ${req.user.restrictionReason}` : "";
+    return res.status(403).json({ success: false, code: "POSTING_RESTRICTED", message: `Posting is restricted on this account.${reason} You can still view your account and content.` });
+  }
+  return next();
+};
+
+module.exports = { protect, optionalProtect, requirePostingAccess };

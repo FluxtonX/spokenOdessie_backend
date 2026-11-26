@@ -5,7 +5,7 @@ const prisma = require("../../config/prisma");
  */
 async function getUserInsightsSummary(userId) {
   const memories = await prisma.memory.findMany({
-    where: { ownerId: userId },
+    where: { ownerId: userId, status: { not: "removed" } },
     select: {
       id: true,
       title: true,

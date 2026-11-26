@@ -1,7 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 
-const { protect, optionalProtect } = require("../../middlewares/auth.middleware");
+const { protect, optionalProtect, requirePostingAccess } = require("../../middlewares/auth.middleware");
 const controller = require("./memory.controller");
 const commentRoutes = require("../comments/comment.routes");
 
@@ -40,14 +40,14 @@ router.get("/discovery", optionalProtect, controller.getDiscoveryMemories);
 router.get("/family-shared", protect, controller.getFamilySharedMemories);
 router.get("/", optionalProtect, controller.getMemories);
 router.get("/:id", optionalProtect, controller.getMemoryDetails);
-router.post("/glasses-ingest", protect, controller.ingestGlassesMedia);
-router.post("/", protect, upload.array("media", 10), controller.createMemory);
+router.post("/glasses-ingest", protect, requirePostingAccess, controller.ingestGlassesMedia);
+router.post("/", protect, requirePostingAccess, upload.array("media", 10), controller.createMemory);
 router.post("/:id/interact", protect, controller.interactWithMemory);
 router.post("/:id/react", protect, controller.reactToMemory);
-router.post("/:id/share", protect, controller.shareMemory);
+router.post("/:id/share", protect, requirePostingAccess, controller.shareMemory);
 router.get("/:memoryId/story-layers", optionalProtect, controller.getStoryLayers);
-router.post("/:memoryId/story-layers", protect, controller.addStoryLayer);
-router.patch("/:id", protect, upload.array("media", 10), controller.updateMemory);
+router.post("/:memoryId/story-layers", protect, requirePostingAccess, controller.addStoryLayer);
+router.patch("/:id", protect, requirePostingAccess, upload.array("media", 10), controller.updateMemory);
 router.delete("/:id", protect, controller.deleteMemory);
 
 
