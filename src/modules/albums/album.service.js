@@ -58,7 +58,7 @@ const serializeAlbum = async (album, currentUser) => {
 
   // Fetch memories associated with this album dynamically
   let memories = await prisma.memory.findMany({
-    where: { albumId: album.id },
+    where: { albumId: album.id, status: { not: "removed" } },
     include: { owner: true }
   });
 

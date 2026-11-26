@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const familyCircleService = require("./familyCircle.service");
-const { protect } = require("../../middlewares/auth.middleware");
+const { protect, requirePostingAccess } = require("../../middlewares/auth.middleware");
 const { rateLimiters } = require("../../middlewares/rateLimit.middleware");
 
 /**
@@ -261,6 +261,7 @@ const { requireFamilyRole } = require("../../middlewares/familyRbac");
 router.post(
   "/:familyCircleId/link-memory",
   protect,
+  requirePostingAccess,
   requireFamilyRole(["ADMIN", "ADULT_MEMBER", "CONTRIBUTOR"]),
   async (req, res) => {
     try {
@@ -347,7 +348,7 @@ router.get(
 /**
  * Story Layers (Multi-perspective contributions to a memory)
  */
-router.post("/memories/:memoryId/story-layers", protect, async (req, res) => {
+router.post("/memories/:memoryId/story-layers", protect, requirePostingAccess, async (req, res) => {
   try {
     const { memoryId } = req.params;
     const { text, audioKey, audioDuration } = req.body;
@@ -386,6 +387,7 @@ router.get("/memories/:memoryId/story-layers", protect, async (req, res) => {
 router.post(
   "/:familyCircleId/prompts",
   protect,
+  requirePostingAccess,
   requireFamilyRole(["ADMIN", "ADULT_MEMBER", "CONTRIBUTOR", "MEMBER"]),
   async (req, res) => {
     try {
@@ -430,7 +432,7 @@ router.get(
   }
 );
 
-router.post("/prompts/:promptId/respond", protect, async (req, res) => {
+router.post("/prompts/:promptId/respond", protect, requirePostingAccess, async (req, res) => {
   try {
     const { promptId } = req.params;
     const { text, audioKey, audioUrl } = req.body;

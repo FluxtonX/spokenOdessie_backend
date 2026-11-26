@@ -28,6 +28,10 @@ model User {
   profileCompleted      Boolean           @default(false)
   role                  Role              @default(USER)
   isActive              Boolean           @default(true)
+  adminRestriction      String            @default("NONE")
+  adminRestrictionReason String?
+  adminRestrictionEndsAt DateTime?
+  adminRestrictionUpdatedAt DateTime?
   lastLogin             DateTime          @default(now())
   lastActive            DateTime          @default(now())
   
@@ -114,6 +118,7 @@ model User {
 
   @@index([email])
   @@index([phoneNumber])
+  @@index([adminRestriction, adminRestrictionEndsAt])
 }
 
 model NewsletterSubscriber {

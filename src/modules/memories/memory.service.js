@@ -22,6 +22,14 @@ const getOwnerDisplayName = (user) => {
   return "Spoken Odyssey User";
 };
 
+const throwIfAdminRemoved = (memory) => {
+  if (memory?.status === "removed") {
+    const error = new Error("This post has been removed by an administrator.");
+    error.statusCode = 404;
+    throw error;
+  }
+};
+
 const normalizeTags = (rawTags) => {
   if (Array.isArray(rawTags)) {
     return rawTags
@@ -340,7 +348,7 @@ const getMemoriesByUser = async (currentUser, targetUserId) => {
     return [];
   }
 
-  const memories = await memoryRepository.findByOwnerFirebaseUid(targetUid);
+  const memories = (await memoryRepository.findByOwnerFirebaseUid(targetUid)).filter((memory) => memory.status !== "removed");
 
   let isOwner = false;
   let targetUserIds = [targetUid];
@@ -759,6 +767,8 @@ const updateMemory = async ({
     throw error;
   }
 
+  throwIfAdminRemoved(memory);
+
   const normalizedTitle = typeof title === "string" ? title.trim() : memory.title || "";
   const normalizedDescription = typeof description === "string" ? description.trim() : memory.description || "";
 
@@ -940,6 +950,8 @@ const deleteMemory = async ({ user, memoryId }) => {
     throw error;
   }
 
+  throwIfAdminRemoved(memory);
+
   await memoryRepository.deleteByIdAndOwnerFirebaseUid(memoryId, user.id);
 
   if (memory.albumId) {
@@ -976,7 +988,7 @@ const getFeedMemories = async ({ user }) => {
           status: "published",
           ownerId: { in: [...familyUids, user.id] }
         },
-        { ownerId: user.id }
+        { ownerId: user.id, status: { not: "removed" } }
       ]
     },
     orderBy: { occurredAt: "desc" },
@@ -1039,6 +1051,8 @@ const interactWithMemory = async ({ user, memoryId, type }) => {
     error.statusCode = 404;
     throw error;
   }
+
+  throwIfAdminRemoved(memory);
 
   const tags = memory.tags || [];
   if (tags.length === 0) {
@@ -1116,6 +1130,8 @@ const getMemoryDetails = async (arg1, arg2) => {
     error.statusCode = 404;
     throw error;
   }
+
+  throwIfAdminRemoved(memory);
 
   const currentUserId = currentUser?.id || currentUser?.uid || currentUser?.sub;
   let isOwner = false;
@@ -1224,6 +1240,7 @@ const reactToMemory = async ({ user, memoryId, type }) => {
       error.statusCode = 404;
       throw error;
     }
+    throwIfAdminRemoved(memory);
 
     const existingReaction = await tx.postReaction.findUnique({
       where: {
@@ -1375,6 +1392,13 @@ const reactToMemory = async ({ user, memoryId, type }) => {
 };
 
 const shareMemory = async ({ user, memoryId }) => {
+  const currentMemory = await prisma.memory.findUnique({ where: { id: memoryId } });
+  if (!currentMemory) {
+    const error = new Error("Memory not found.");
+    error.statusCode = 404;
+    throw error;
+  }
+  throwIfAdminRemoved(currentMemory);
   const updatedMemory = await prisma.memory.update({
     where: { id: memoryId },
     data: { shares: { increment: 1 } }
@@ -1483,6 +1507,7 @@ const getDiscoveryMemories = async ({ user, filter = "public", theme, q, page = 
   }
 
   const conditions = [
+    { status: { not: "removed" } },
     {
       NOT: {
         AND: [

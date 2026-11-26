@@ -28,6 +28,7 @@ const searchArchive = async ({ currentUser, q, type }) => {
     const memories = await prisma.memory.findMany({
       where: {
         AND: [
+          { status: { not: "removed" } },
           {
             OR: [
               { privacy: "Public", status: "published" },

@@ -119,6 +119,11 @@ const createComment = async ({ user, memoryId, text, parentCommentId }) => {
     error.statusCode = 404;
     throw error;
   }
+  if (memory.status === "removed") {
+    const error = new Error("This post has been removed by an administrator.");
+    error.statusCode = 404;
+    throw error;
+  }
 
   let validParentId = null;
   let parentComment = null;

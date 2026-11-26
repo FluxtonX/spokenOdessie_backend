@@ -201,6 +201,17 @@ const login = async (req, res) => {
       });
     }
 
+    const restrictionService = require("../../services/adminAccountRestrictions.service");
+    const currentAccount = await restrictionService.refreshExpiredRestriction(user);
+    const restriction = restrictionService.getEffectiveRestriction(currentAccount);
+    if (["TEMPORARY_SUSPENDED", "PERMANENTLY_SUSPENDED"].includes(restriction)) {
+      const endNote = restriction === "TEMPORARY_SUSPENDED" && currentAccount.adminRestrictionEndsAt
+        ? ` until ${new Date(currentAccount.adminRestrictionEndsAt).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })}`
+        : "";
+      const reasonNote = currentAccount.adminRestrictionReason ? ` Reason: ${currentAccount.adminRestrictionReason}` : "";
+      return res.status(403).json({ success: false, code: "ACCOUNT_DISABLED", message: `This account is suspended${endNote}.${reasonNote} Contact support if you need help.` });
+    }
+
     // Check MFA configuration
     const mfaState = await getUserMfaState(user.id);
     if (mfaState && mfaState.mfaEnabled) {
