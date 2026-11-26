@@ -36,6 +36,9 @@ const parsePagination = (query) => {
   return { page, limit };
 };
 
+const publicPrivacyFilter = () => ({ privacy: { equals: "Public", mode: "insensitive" } });
+const isPublicPrivacy = (privacy) => String(privacy || "").trim().toLowerCase() === "public";
+
 const escapeHtml = (value) => String(value || "").replace(/[&<>\"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[char]);
 
 const getAdminMediaUrl = async (key) => {
@@ -118,7 +121,7 @@ const getOverview = async (req, res, next) => {
       prisma.memory.count(),
       prisma.familyMemoryLink.count(),
       prisma.memory.groupBy({ by: ["type"], _count: { _all: true } }),
-      prisma.mediaAsset.groupBy({ by: ["mimeType"], _count: { _all: true } }),
+      prisma.mediaAsset.groupBy({ by: ["mimeType"], where: { memory: { is: publicPrivacyFilter() } }, _count: { _all: true } }),
       prisma.$queryRaw`SELECT to_char(date_trunc(${grain}, "createdAt"), ${dateFormat}) AS bucket, COUNT(*)::int AS count FROM "User" WHERE "createdAt" >= ${start} GROUP BY 1`,
       prisma.$queryRaw`SELECT to_char(date_trunc(${grain}, "createdAt"), ${dateFormat}) AS bucket, COUNT(*)::int AS count FROM "FamilyCircle" WHERE "createdAt" >= ${start} GROUP BY 1`,
     ]);
@@ -167,7 +170,7 @@ const getUserDetails = async (req, res, next) => {
 
     const [typeRows, recentPosts] = await Promise.all([
       prisma.memory.groupBy({ by: ["type"], where: { ownerId: user.id }, _count: { _all: true } }),
-      prisma.memory.findMany({ where: { ownerId: user.id }, orderBy: { createdAt: "desc" }, take: 12, select: { id: true, title: true, type: true, status: true, createdAt: true } }),
+      prisma.memory.findMany({ where: { ownerId: user.id, ...publicPrivacyFilter() }, orderBy: { createdAt: "desc" }, take: 12, select: { id: true, title: true, type: true, status: true, createdAt: true } }),
     ]);
     const postTypes = emptyPostTypes();
     for (const row of typeRows) postTypes[postCategory(row.type)] += row._count._all;
@@ -177,8 +180,8 @@ const getUserDetails = async (req, res, next) => {
 
 const getContentDetails = async (req, res, next) => {
   try {
-    const memory = await prisma.memory.findUnique({
-      where: { id: req.params.id },
+    const memory = await prisma.memory.findFirst({
+      where: { id: req.params.id, ...publicPrivacyFilter() },
       select: {
         id: true, title: true, description: true, tags: true, type: true, status: true, privacy: true,
         mood: true, occurredAt: true, createdAt: true, updatedAt: true, isVaultLocked: true, unlockAt: true,
@@ -188,7 +191,7 @@ const getContentDetails = async (req, res, next) => {
         storyLayers: { orderBy: { createdAt: "asc" }, select: { id: true, text: true, audioKey: true, audioDuration: true, transcriptText: true, transcriptStatus: true, createdAt: true, author: { select: { displayName: true, email: true } } } },
       },
     });
-    if (!memory) return res.status(404).json({ success: false, message: "Post not found." });
+    if (!memory) return res.status(404).json({ success: false, message: "Public post not found." });
 
     await auditAdminAction(prisma, req, "ADMIN_CONTENT_VIEWED", {
       memoryId: memory.id, title: memory.title, ownerId: memory.owner.id,
@@ -240,7 +243,7 @@ const getFamilyDetails = async (req, res, next) => {
         createdBy: { select: { id: true, displayName: true, email: true } },
         members: { orderBy: { joinedAt: "asc" }, select: { id: true, role: true, status: true, relationship: true, joinedAt: true, user: { select: { id: true, displayName: true, email: true, photoURL: true, createdAt: true, _count: { select: { memories: true } } } } } },
         invitations: { orderBy: { createdAt: "desc" }, take: 30, select: { id: true, email: true, phoneNumber: true, relationship: true, method: true, status: true, createdAt: true, expiresAt: true } },
-        memoryLinks: { orderBy: { occurredAt: "desc" }, take: 20, select: { id: true, occurredAt: true, createdAt: true, memory: { select: { id: true, title: true, type: true, status: true, owner: { select: { id: true, displayName: true, email: true } } } } } },
+        memoryLinks: { where: { memory: { is: publicPrivacyFilter() } }, orderBy: { occurredAt: "desc" }, take: 20, select: { id: true, occurredAt: true, createdAt: true, memory: { select: { id: true, title: true, type: true, status: true, owner: { select: { id: true, displayName: true, email: true } } } } } },
         _count: { select: { members: { where: { status: "ACTIVE" } }, memoryLinks: true } },
       },
     });
@@ -404,6 +407,7 @@ const getContent = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "Unsupported post status filter." });
     }
     const where = {
+      ...publicPrivacyFilter(),
       ...(status !== "all" ? { status } : {}),
       ...(type !== "all" ? { type: { equals: type, mode: "insensitive" } } : {}),
       ...(search ? { OR: [
@@ -412,7 +416,7 @@ const getContent = async (req, res, next) => {
         { owner: { displayName: { contains: search, mode: "insensitive" } } },
       ] } : {}),
     };
-    const [total, memories] = await Promise.all([
+    const [total, memories, publicPostCount, privateAndFamilyPostCount] = await Promise.all([
       prisma.memory.count({ where }),
       prisma.memory.findMany({
         where, orderBy: { createdAt: "desc" }, skip: (page - 1) * limit, take: limit,
@@ -422,8 +426,15 @@ const getContent = async (req, res, next) => {
           _count: { select: { mediaAssets: true, comments: true } },
         },
       }),
+      prisma.memory.count({ where: publicPrivacyFilter() }),
+      prisma.memory.count({ where: { NOT: publicPrivacyFilter() } }),
     ]);
-    return res.json({ success: true, data: memories, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
+    return res.json({
+      success: true,
+      data: memories,
+      summary: { publicPosts: publicPostCount, privateAndFamilyPosts: privateAndFamilyPostCount },
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    });
   } catch (error) { return next(error); }
 };
 
@@ -434,8 +445,8 @@ const updateContentStatus = async (req, res, next) => {
     if (!["remove", "restore"].includes(action) || reason.length < 3 || reason.length > 500) {
       return res.status(400).json({ success: false, message: "Choose remove or restore and provide a reason (3–500 characters)." });
     }
-    const memory = await prisma.memory.findUnique({ where: { id: req.params.id }, select: { id: true, status: true, title: true, ownerId: true, owner: { select: { email: true } } } });
-    if (!memory) return res.status(404).json({ success: false, message: "Post not found." });
+    const memory = await prisma.memory.findFirst({ where: { id: req.params.id, ...publicPrivacyFilter() }, select: { id: true, status: true, title: true, ownerId: true, owner: { select: { email: true } } } });
+    if (!memory) return res.status(404).json({ success: false, message: "Public post not found." });
     let nextStatus;
     if (action === "remove") {
       if (["archived", "removed"].includes(memory.status)) return res.status(409).json({ success: false, message: "This post is already removed or archived." });
@@ -452,7 +463,16 @@ const updateContentStatus = async (req, res, next) => {
       }
     }
     const updated = await prisma.$transaction(async (tx) => {
-      const result = await tx.memory.update({ where: { id: memory.id }, data: { status: nextStatus }, select: { id: true, title: true, status: true } });
+      const changed = await tx.memory.updateMany({
+        where: { id: memory.id, status: memory.status, ...publicPrivacyFilter() },
+        data: { status: nextStatus },
+      });
+      if (changed.count !== 1) {
+        const error = new Error("Only public posts can be changed by admin moderation.");
+        error.statusCode = 404;
+        throw error;
+      }
+      const result = await tx.memory.findUnique({ where: { id: memory.id }, select: { id: true, title: true, status: true } });
       const auditAction = action === "restore" ? "ADMIN_CONTENT_RESTORED" : "ADMIN_CONTENT_REMOVED";
       await auditAdminAction(tx, req, auditAction, {
         memoryId: memory.id, title: memory.title, ownerId: memory.ownerId,
@@ -515,7 +535,13 @@ const getAdminActivity = async (req, res, next) => {
         select: { id: true, action: true, ipAddress: true, userAgent: true, metadata: true, createdAt: true },
       }),
     ]);
-    return res.json({ success: true, data: entries, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
+    const safeEntries = entries.map((entry) => {
+      if (entry.action === "ADMIN_CONTENT_VIEWED" && !isPublicPrivacy(entry.metadata?.privacy)) {
+        return { ...entry, metadata: { adminEmail: entry.metadata?.adminEmail, privacy: "Private or family", accessRestricted: true } };
+      }
+      return entry;
+    });
+    return res.json({ success: true, data: safeEntries, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
   } catch (error) { return next(error); }
 };
 

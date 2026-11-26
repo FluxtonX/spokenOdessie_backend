@@ -48,4 +48,6 @@ Account restrictions support full access, posting restricted, temporary suspensi
 
 The account restriction fields require the checked-in migration `20261126000000_add_admin_moderation_controls`. Before applying it, confirm `DATABASE_URL` points to the intended development database. Apply migrations with `npx prisma migrate deploy`, then regenerate the Prisma client with `npx prisma generate`. Temporary suspensions expire automatically the next time the user signs in or makes a protected API request.
 
-The dashboard currently reports real user, family, memory, and media-asset data. Subscription and revenue are intentionally not included yet; the existing Stripe order domain is separate from service subscriptions.
+The admin content review queue only returns posts whose privacy setting is explicitly `Public`. Private and family posts are represented by an aggregate count and cannot be opened, have their media signed, or be removed/restored through admin routes. The user and family detail views may show public post titles; their post totals and type counts remain aggregate across privacy settings. Aggregate media-asset statistics include public posts only. Private-content reports and case-scoped review access are not implemented.
+
+The dashboard currently reports real user, family, memory, and public media-asset data. Subscription and revenue are intentionally not included yet; the existing Stripe order domain is separate from service subscriptions.
