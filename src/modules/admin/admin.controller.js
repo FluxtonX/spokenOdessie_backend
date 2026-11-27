@@ -168,13 +168,18 @@ const getUserDetails = async (req, res, next) => {
     if (!user) return res.status(404).json({ success: false, message: "User not found." });
     const currentUser = await refreshExpiredRestriction(user);
 
-    const [typeRows, recentPosts] = await Promise.all([
+    const [typeRows, recentPosts, restrictionHistory] = await Promise.all([
       prisma.memory.groupBy({ by: ["type"], where: { ownerId: user.id }, _count: { _all: true } }),
       prisma.memory.findMany({ where: { ownerId: user.id, ...publicPrivacyFilter() }, orderBy: { createdAt: "desc" }, take: 12, select: { id: true, title: true, type: true, status: true, createdAt: true } }),
+      prisma.securityAuditLog.findMany({
+        where: { action: "ADMIN_USER_RESTRICTION_CHANGED", metadata: { path: ["targetUserId"], equals: user.id } },
+        orderBy: { createdAt: "desc" }, take: 20,
+        select: { id: true, action: true, metadata: true, createdAt: true },
+      }),
     ]);
     const postTypes = emptyPostTypes();
     for (const row of typeRows) postTypes[postCategory(row.type)] += row._count._all;
-    res.json({ success: true, data: { ...currentUser, restrictionStatus: getEffectiveRestriction(currentUser), postTypes, recentPosts } });
+    res.json({ success: true, data: { ...currentUser, restrictionStatus: getEffectiveRestriction(currentUser), postTypes, recentPosts, restrictionHistory } });
   } catch (error) { next(error); }
 };
 
@@ -251,7 +256,12 @@ const getFamilyDetails = async (req, res, next) => {
     const familyTypeRows = await prisma.$queryRaw`SELECT m."type" AS type, COUNT(*)::int AS count FROM family_memory_links fml JOIN "Memory" m ON m."id" = fml."memoryId" WHERE fml."familyCircleId" = ${family.id} GROUP BY m."type"`;
     const postTypes = emptyPostTypes();
     for (const row of familyTypeRows) postTypes[postCategory(row.type)] += row.count;
-    res.json({ success: true, data: { ...family, postTypes } });
+    const adminHistory = await prisma.securityAuditLog.findMany({
+      where: { action: "ADMIN_FAMILY_INVITATION_REVOKED", metadata: { path: ["familyCircleId"], equals: family.id } },
+      orderBy: { createdAt: "desc" }, take: 20,
+      select: { id: true, action: true, metadata: true, createdAt: true },
+    });
+    res.json({ success: true, data: { ...family, postTypes, adminHistory } });
   } catch (error) { next(error); }
 };
 
@@ -261,8 +271,11 @@ const getUsers = async (req, res, next) => {
     const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 25));
     const search = String(req.query.search || "").trim();
     const familyFilter = req.query.family === "joined" ? "joined" : req.query.family === "none" ? "none" : "all";
+    const activityFilter = req.query.activity === "active30" ? "active30" : "all";
     const sort = ["oldest", "name", "active"].includes(req.query.sort) ? req.query.sort : "recent";
+    const activeSince = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
     const where = {
+      ...(activityFilter === "active30" ? { isActive: true, lastActive: { gte: activeSince } } : {}),
       ...(search ? { OR: [
       { email: { contains: search, mode: "insensitive" } },
       { displayName: { contains: search, mode: "insensitive" } },
@@ -291,7 +304,7 @@ const getUsers = async (req, res, next) => {
     }
     const currentUsers = await Promise.all(users.map(refreshExpiredRestriction));
     const results = currentUsers.map((user) => ({ ...user, restrictionStatus: getEffectiveRestriction(user), postTypes: typesByUser.get(user.id) }));
-    res.json({ success: true, data: results, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
+    res.json({ success: true, data: results, filters: { activity: activityFilter }, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
   } catch (error) { next(error); }
 };
 
@@ -527,19 +540,55 @@ const updateFamilyInvitation = async (req, res, next) => {
 const getAdminActivity = async (req, res, next) => {
   try {
     const { page, limit } = parsePagination(req.query);
+    const actionValues = new Map([
+      ["user_restriction", "ADMIN_USER_RESTRICTION_CHANGED"],
+      ["content_removed", "ADMIN_CONTENT_REMOVED"],
+      ["content_restored", "ADMIN_CONTENT_RESTORED"],
+      ["content_viewed", "ADMIN_CONTENT_VIEWED"],
+      ["family_invitation", "ADMIN_FAMILY_INVITATION_REVOKED"],
+    ]);
+    const actionFilter = String(req.query.action || "all");
+    if (actionFilter !== "all" && !actionValues.has(actionFilter)) {
+      return res.status(400).json({ success: false, message: "Unsupported activity action filter." });
+    }
+    const from = req.query.from ? new Date(`${req.query.from}T00:00:00.000Z`) : null;
+    const to = req.query.to ? new Date(`${req.query.to}T00:00:00.000Z`) : null;
+    if ((from && Number.isNaN(from.getTime())) || (to && Number.isNaN(to.getTime())) || (from && to && from > to)) {
+      return res.status(400).json({ success: false, message: "Choose a valid activity date range." });
+    }
+    const toExclusive = to ? new Date(to.getTime() + 24 * 60 * 60 * 1000) : null;
+    const search = String(req.query.search || "").trim().slice(0, 120);
+    const where = {
+      action: actionFilter === "all" ? { startsWith: "ADMIN_" } : actionValues.get(actionFilter),
+      ...(from || toExclusive ? { createdAt: { ...(from ? { gte: from } : {}), ...(toExclusive ? { lt: toExclusive } : {}) } } : {}),
+      ...(search ? { OR: [
+        { metadata: { path: ["adminEmail"], string_contains: search } },
+        { metadata: { path: ["targetEmail"], string_contains: search } },
+        { metadata: { path: ["email"], string_contains: search } },
+        { metadata: { path: ["title"], string_contains: search } },
+        { metadata: { path: ["reason"], string_contains: search } },
+      ] } : {}),
+    };
     const [total, entries] = await Promise.all([
-      prisma.securityAuditLog.count({ where: { action: { startsWith: "ADMIN_" } } }),
+      prisma.securityAuditLog.count({ where }),
       prisma.securityAuditLog.findMany({
-        where: { action: { startsWith: "ADMIN_" } }, orderBy: { createdAt: "desc" },
+        where, orderBy: { createdAt: "desc" },
         skip: (page - 1) * limit, take: limit,
         select: { id: true, action: true, ipAddress: true, userAgent: true, metadata: true, createdAt: true },
       }),
     ]);
-    const safeEntries = entries.map((entry) => {
-      if (entry.action === "ADMIN_CONTENT_VIEWED" && !isPublicPrivacy(entry.metadata?.privacy)) {
-        return { ...entry, metadata: { adminEmail: entry.metadata?.adminEmail, privacy: "Private or family", accessRestricted: true } };
-      }
-      return entry;
+    const contentActions = new Set(["ADMIN_CONTENT_VIEWED", "ADMIN_CONTENT_REMOVED", "ADMIN_CONTENT_RESTORED"]);
+    const contentIds = [...new Set(entries
+      .filter((entry) => contentActions.has(entry.action) && typeof entry.metadata?.memoryId === "string")
+      .map((entry) => entry.metadata.memoryId))];
+    const contentPrivacyRows = contentIds.length ? await prisma.memory.findMany({
+      where: { id: { in: contentIds } }, select: { id: true, privacy: true },
+    }) : [];
+    const contentPrivacyById = new Map(contentPrivacyRows.map((memory) => [memory.id, memory.privacy]));
+    const safeEntries = entries.filter((entry) => {
+      if (!contentActions.has(entry.action)) return true;
+      const privacy = contentPrivacyById.get(entry.metadata?.memoryId);
+      return isPublicPrivacy(privacy);
     });
     return res.json({ success: true, data: safeEntries, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
   } catch (error) { return next(error); }

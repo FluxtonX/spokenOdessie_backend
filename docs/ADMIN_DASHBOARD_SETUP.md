@@ -29,7 +29,7 @@ The backend defaults to port `5000` (`PORT` can override it), so set this to the
 - `POST /api/admin/auth/login`
 - `GET /api/admin/auth/me`
 - `GET /api/admin/dashboard?period=30d|12m`
-- `GET /api/admin/users?page=1&limit=25&search=&family=all|joined|none&sort=recent|oldest|name|active`
+- `GET /api/admin/users?page=1&limit=25&search=&family=all|joined|none&activity=all|active30&sort=recent|oldest|name|active`
 - `GET /api/admin/users/:id`
 - `GET /api/admin/families?page=1&limit=25&search=&sort=recent|oldest|name|members`
 - `GET /api/admin/families/:id`
@@ -38,7 +38,7 @@ The backend defaults to port `5000` (`PORT` can override it), so set this to the
 - `PATCH /api/admin/content/:id/status` with `{ "action": "remove"|"restore", "reason": "..." }`
 - `PATCH /api/admin/users/:id/status` with `{ "status": "NONE"|"POSTING_RESTRICTED"|"TEMPORARY_SUSPENDED"|"PERMANENTLY_SUSPENDED", "endsAt": "ISO date for temporary suspensions", "reason": "..." }`
 - `PATCH /api/admin/families/:familyId/invitations/:invitationId` with `{ "action": "revoke", "reason": "..." }`
-- `GET /api/admin/activity?page=1&limit=25`
+- `GET /api/admin/activity?page=1&limit=25&action=all|user_restriction|content_removed|content_restored|content_viewed|family_invitation&from=YYYY-MM-DD&to=YYYY-MM-DD&search=`
 
 Every endpoint except login requires a valid signed admin session. Session authorization is tied to the configured email and the current configured password. The existing `User.role` is not used for this separate environment-configured admin identity.
 
@@ -48,6 +48,6 @@ Account restrictions support full access, posting restricted, temporary suspensi
 
 The account restriction fields require the checked-in migration `20261126000000_add_admin_moderation_controls`. Before applying it, confirm `DATABASE_URL` points to the intended development database. Apply migrations with `npx prisma migrate deploy`, then regenerate the Prisma client with `npx prisma generate`. Temporary suspensions expire automatically the next time the user signs in or makes a protected API request.
 
-The admin content review queue only returns posts whose privacy setting is explicitly `Public`. Private and family posts are represented by an aggregate count and cannot be opened, have their media signed, or be removed/restored through admin routes. The user and family detail views may show public post titles; their post totals and type counts remain aggregate across privacy settings. Aggregate media-asset statistics include public posts only. Private-content reports and case-scoped review access are not implemented.
+The admin content review queue only returns posts whose privacy setting is explicitly `Public`. Private and family posts are represented by an aggregate count and cannot be opened, have their media signed, or be removed/restored through admin routes. The user and family detail views may show public post titles; their post totals and type counts remain aggregate across privacy settings. Aggregate media-asset statistics include public posts only. Private-content reports and case-scoped review access are not implemented. Admin account restriction history and family invitation action history are returned in their respective detail endpoints.
 
 The dashboard currently reports real user, family, memory, and public media-asset data. Subscription and revenue are intentionally not included yet; the existing Stripe order domain is separate from service subscriptions.
